@@ -1,0 +1,23 @@
+# pnpm's settings (Kit is one package, not a workspace). As iterate's monorepo: a new release waits a
+# day before install, but for the Cloudflare toolchain, which ships fixes we wait on.
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - miniflare
+  - wrangler
+  - workerd
+  - "@cloudflare/workerd-darwin-64"
+  - "@cloudflare/workerd-darwin-arm64"
+  - "@cloudflare/workerd-linux-64"
+  - "@cloudflare/workerd-linux-arm64"
+  - "@cloudflare/workerd-windows-64"
+  - "@cloudflare/unenv-preset"
+  - "@cloudflare/vite-plugin"
+  - "@cloudflare/workers-types"
+  - trpc-cli
+  - "@iterate-com/capnweb"
+onlyBuiltDependencies:
+  - "@tailwindcss/oxide"
+  - esbuild
+  - lightningcss
+  - sharp
+  - workerd

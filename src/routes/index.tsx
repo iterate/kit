@@ -1,14 +1,9 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
-import { LogInWithIterate } from "@iterate-com/ui/components/log-in-with-iterate";
-import { IterateLogo } from "@iterate-com/ui/components/iterate-logo";
-import {
-  Field,
-  FieldContent,
-  FieldLabel,
-  FieldDescription,
-} from "@iterate-com/ui/components/ui/field";
+import { LogInWithIterate } from "#/components/log-in-with-iterate.tsx";
+import { IterateLogo } from "#/components/iterate-logo.tsx";
+import { Field, FieldContent, FieldLabel, FieldDescription } from "#/components/ui/field.tsx";
 import {
   Select,
   SelectContent,
@@ -16,7 +11,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@iterate-com/ui/components/ui/select";
+} from "#/components/ui/select.tsx";
 import { DEFAULT_DEVICE_ID, findFirmwareDevice, firmwareCatalog } from "../firmware/catalog.ts";
 
 export const Route = createFileRoute("/")({

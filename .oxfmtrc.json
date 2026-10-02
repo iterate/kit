@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": false,
+  "quoteProps": "as-needed",
+  "trailingComma": "all",
+  "bracketSpacing": true,
+  "bracketSameLine": false,
+  "arrowParens": "always",
+  "endOfLine": "lf",
+  "embeddedLanguageFormatting": "auto",
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "node_modules/",
+    "dist/",
+    ".wrangler/",
+    "firmware/.build/",
+    "routeTree.gen.ts",
+    "firmware/components/avatar/src/face_avatar_catalog_generated.inc",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "src/components/ui/"
+  ]
+}

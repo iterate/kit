@@ -2,10 +2,10 @@ export const DEFAULT_DEVICE_ID = "home-assistant-voice-preview-edition";
 
 /**
  * Firmware ships as GitHub releases of this repository, one per device build, tagged by
- * `firmwareReleaseTag` (apps/kit/scripts/firmware-release.ts builds them; apps/kit/README.md
+ * `firmwareReleaseTag` (scripts/firmware-release.ts builds them; README.md
  * "Firmware releases").
  */
-export const FIRMWARE_REPOSITORY = "iterate/iterate";
+export const FIRMWARE_REPOSITORY = "iterate/kit";
 
 /**
  * A release version: `<first-parent commit count, zero-padded to 6>-<UTC committer date>-<commit

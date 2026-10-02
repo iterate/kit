@@ -1,6 +1,4 @@
-@import "@iterate-com/ui/globals.css";
-
-@source "./**/*.{ts,tsx}";
+@import "./styles/globals.css";
 
 @layer base {
   body {

@@ -49,7 +49,7 @@ test("plan: a device that has never been released is built", () => {
 test("plan: a change to one board's own directory builds only that board", () => {
   using repo = firmwareRepository();
   const releases = repo.releaseAll();
-  repo.commit({ "apps/kit/firmware/devices/a/board.c": "changed" });
+  repo.commit({ "firmware/devices/a/board.c": "changed" });
   const plan = repo.plan({ releases });
 
   expect(summary(plan)).toEqual([
@@ -59,30 +59,30 @@ test("plan: a change to one board's own directory builds only that board", () =>
   expect(plan).toMatchObject({ build: [{ device: "device-a", previous: releases[0]!.version }] });
 });
 
-test.for([
-  "apps/kit/firmware/targets/common/sdkconfig.defaults",
-  "apps/kit/firmware/components/x/src/x.c",
-])("plan: a change to shared code (%s) builds every board", (file) => {
-  using repo = firmwareRepository();
-  const releases = repo.releaseAll();
-  repo.commit({ [file]: "changed" });
+test.for(["firmware/targets/common/sdkconfig.defaults", "firmware/components/x/src/x.c"])(
+  "plan: a change to shared code (%s) builds every board",
+  (file) => {
+    using repo = firmwareRepository();
+    const releases = repo.releaseAll();
+    repo.commit({ [file]: "changed" });
 
-  expect(summary(repo.plan({ releases }))).toEqual([
-    `build device-a: inputs changed since ${releases[0]!.version}`,
-    `build device-b: inputs changed since ${releases[1]!.version}`,
-  ]);
-});
+    expect(summary(repo.plan({ releases }))).toEqual([
+      `build device-a: inputs changed since ${releases[0]!.version}`,
+      `build device-b: inputs changed since ${releases[1]!.version}`,
+    ]);
+  },
+);
 
 test.for([
-  "apps/kit/firmware/devices/b/board.c",
-  "apps/kit/firmware/targets/b/CMakeLists.txt",
-  "apps/kit/firmware/devices/mac/board.c",
-  "apps/kit/firmware/CMakeLists.txt",
-  "apps/kit/firmware/platforms/host/esp_idf.c",
-  "apps/kit/firmware/tests/board_test.c",
-  "apps/kit/firmware/components/x/tests/x_test.c",
-  "apps/kit/firmware/README.md",
-  "apps/kit/firmware/devices/a/notes.md",
+  "firmware/devices/b/board.c",
+  "firmware/targets/b/CMakeLists.txt",
+  "firmware/devices/mac/board.c",
+  "firmware/CMakeLists.txt",
+  "firmware/platforms/host/esp_idf.c",
+  "firmware/tests/board_test.c",
+  "firmware/components/x/tests/x_test.c",
+  "firmware/README.md",
+  "firmware/devices/a/notes.md",
 ])("plan: a change to %s does not build board a", (file) => {
   using repo = firmwareRepository();
   const releases = repo.releaseAll();
@@ -105,7 +105,7 @@ test("plan: devices=all builds every board", () => {
 test("plan: a main run never releases at or behind a device's newest release, even when forced", () => {
   using repo = firmwareRepository();
   const old = repo.head();
-  repo.commit({ "apps/kit/firmware/devices/a/board.c": "newer" });
+  repo.commit({ "firmware/devices/a/board.c": "newer" });
   const releases = repo.releaseAll();
   const skipped = [
     `skip device-a: released at or after this commit (${releases[0]!.version})`,
@@ -124,7 +124,7 @@ test("plan: a pull request that changes the builder builds every board", () => {
   using repo = firmwareRepository();
   const releases = repo.releaseAll();
   const base = repo.head();
-  repo.commit({ "apps/kit/scripts/firmware-release.ts": "// changed" });
+  repo.commit({ "scripts/firmware-release.ts": "// changed" });
 
   expect(summary(repo.plan({ releases, base }))).toEqual([
     "build device-a: builder changed on this pull request",
@@ -140,7 +140,7 @@ test("plan: a pull request that changes the builder builds every board", () => {
 test("plan: each device is compared with its newest release", () => {
   using repo = firmwareRepository();
   const first = repo.releaseAll();
-  repo.commit({ "apps/kit/firmware/devices/a/board.c": "released later" });
+  repo.commit({ "firmware/devices/a/board.c": "released later" });
   const newer = { ...first[0]!, version: repo.version(repo.head()), commit: repo.head() };
 
   expect(summary(repo.plan({ releases: [newer, ...first] }))).toEqual([
@@ -150,17 +150,17 @@ test("plan: each device is compared with its newest release", () => {
 });
 
 test("firmwareInputs: excludes every other board, the Mac included, and what only the host build reads", () => {
-  const repoRoot = join(import.meta.dirname, "../../..");
+  const repoRoot = join(import.meta.dirname, "..");
   const inputs = firmwareInputs(repoRoot, "havpe");
 
   expect(inputs).toEqual(
     expect.arrayContaining([
-      "apps/kit/firmware",
-      ":(exclude)apps/kit/firmware/devices/mac",
-      ":(exclude)apps/kit/firmware/targets/mac",
-      ":(exclude)apps/kit/firmware/devices/satellite1",
-      ":(exclude)apps/kit/firmware/platforms/host",
-      ":(exclude,glob)apps/kit/firmware/**/*.md",
+      "firmware",
+      ":(exclude)firmware/devices/mac",
+      ":(exclude)firmware/targets/mac",
+      ":(exclude)firmware/devices/satellite1",
+      ":(exclude)firmware/platforms/host",
+      ":(exclude,glob)firmware/**/*.md",
     ]),
   );
   expect(inputs.join("\n")).not.toMatch(/\/(devices|targets)\/(havpe|common)$/m);
@@ -357,10 +357,10 @@ const ninjaOutput = {
   directory: "/tmp/kit-firmware/build",
   // `ninja -t inputs all`: sorted, shell-quoted when needed
   inputs: [
-    "../../../work/iterate/apps/kit/firmware/components/core/src/core.c",
-    "/work/iterate/apps/kit/firmware/devices/havpe/assets/call_ended.wav",
-    "'/work/iterate/apps/kit/firmware/devices/satellite1/it'\\''s here.c'",
-    "/work/iterate/apps/kit/firmware/targets/stackchan/CMakeLists.txt",
+    "../../../work/iterate/firmware/components/core/src/core.c",
+    "/work/iterate/firmware/devices/havpe/assets/call_ended.wav",
+    "'/work/iterate/firmware/devices/satellite1/it'\\''s here.c'",
+    "/work/iterate/firmware/targets/stackchan/CMakeLists.txt",
     "/opt/esp-idf/components/esp_system/startup.c",
     "esp-idf/avatar/generated-sounds/sounds_generated.inc",
     "",
@@ -369,9 +369,9 @@ const ninjaOutput = {
   regeneration: [
     "build.ninja:",
     "  input: RERUN_CMAKE",
-    "    | /work/iterate/apps/kit/firmware/targets/stackchan/CMakeLists.txt",
-    "    | /work/iterate/apps/kit/firmware/targets/common/components.cmake",
-    "    || /work/iterate/apps/kit/firmware/devices/zectrix_note4/extra.cmake",
+    "    | /work/iterate/firmware/targets/stackchan/CMakeLists.txt",
+    "    | /work/iterate/firmware/targets/common/components.cmake",
+    "    || /work/iterate/firmware/devices/zectrix_note4/extra.cmake",
     "  outputs:",
     "    all",
     "",
@@ -379,8 +379,8 @@ const ninjaOutput = {
   // `ninja -t deps`: each object's headers, indented four spaces
   deps: [
     "esp-idf/core/CMakeFiles/__idf_core.dir/src/core.c.obj: #deps 2, deps mtime 1727136000 (VALID)",
-    "    /work/iterate/apps/kit/firmware/components/core/include/iterate/kit/core.h",
-    "    /work/iterate/apps/kit/firmware/platforms/host/include/esp_log.h",
+    "    /work/iterate/firmware/components/core/include/iterate/kit/core.h",
+    "    /work/iterate/firmware/platforms/host/include/esp_log.h",
     "",
   ].join("\n"),
 };
@@ -389,42 +389,42 @@ test("ninjaPaths: every listed and reported path, resolved against the build dir
   expect([...ninjaPaths(ninjaOutput)].sort()).toEqual([
     "/opt/esp-idf/components/esp_system/startup.c",
     "/tmp/kit-firmware/build/esp-idf/avatar/generated-sounds/sounds_generated.inc",
-    "/work/iterate/apps/kit/firmware/components/core/include/iterate/kit/core.h",
-    "/work/iterate/apps/kit/firmware/components/core/src/core.c",
-    "/work/iterate/apps/kit/firmware/devices/havpe/assets/call_ended.wav",
-    "/work/iterate/apps/kit/firmware/devices/satellite1/it's here.c",
-    "/work/iterate/apps/kit/firmware/devices/zectrix_note4/extra.cmake",
-    "/work/iterate/apps/kit/firmware/platforms/host/include/esp_log.h",
-    "/work/iterate/apps/kit/firmware/targets/common/components.cmake",
-    "/work/iterate/apps/kit/firmware/targets/stackchan/CMakeLists.txt",
+    "/work/iterate/firmware/components/core/include/iterate/kit/core.h",
+    "/work/iterate/firmware/components/core/src/core.c",
+    "/work/iterate/firmware/devices/havpe/assets/call_ended.wav",
+    "/work/iterate/firmware/devices/satellite1/it's here.c",
+    "/work/iterate/firmware/devices/zectrix_note4/extra.cmake",
+    "/work/iterate/firmware/platforms/host/include/esp_log.h",
+    "/work/iterate/firmware/targets/common/components.cmake",
+    "/work/iterate/firmware/targets/stackchan/CMakeLists.txt",
   ]);
 });
 
 test("filesOutsideInputs: tracked files outside the device's inputs, never untracked or generated ones", () => {
   const read = [...ninjaPaths(ninjaOutput)].map((path) => relative("/work/iterate", path));
   const tracked = new Set([
-    "apps/kit/firmware/components/core/src/core.c",
-    "apps/kit/firmware/components/core/include/iterate/kit/core.h",
-    "apps/kit/firmware/devices/havpe/assets/call_ended.wav",
-    "apps/kit/firmware/devices/satellite1/it's here.c",
-    "apps/kit/firmware/devices/zectrix_note4/extra.cmake",
-    "apps/kit/firmware/platforms/host/include/esp_log.h",
-    "apps/kit/firmware/targets/common/components.cmake",
-    "apps/kit/firmware/targets/stackchan/CMakeLists.txt",
+    "firmware/components/core/src/core.c",
+    "firmware/components/core/include/iterate/kit/core.h",
+    "firmware/devices/havpe/assets/call_ended.wav",
+    "firmware/devices/satellite1/it's here.c",
+    "firmware/devices/zectrix_note4/extra.cmake",
+    "firmware/platforms/host/include/esp_log.h",
+    "firmware/targets/common/components.cmake",
+    "firmware/targets/stackchan/CMakeLists.txt",
   ]);
   // stackchan's inputs: everything but the other boards and the host platform
   const covered = new Set([
-    "apps/kit/firmware/components/core/src/core.c",
-    "apps/kit/firmware/components/core/include/iterate/kit/core.h",
-    "apps/kit/firmware/targets/common/components.cmake",
-    "apps/kit/firmware/targets/stackchan/CMakeLists.txt",
+    "firmware/components/core/src/core.c",
+    "firmware/components/core/include/iterate/kit/core.h",
+    "firmware/targets/common/components.cmake",
+    "firmware/targets/stackchan/CMakeLists.txt",
   ]);
 
   expect(filesOutsideInputs({ read, tracked, covered })).toEqual([
-    "apps/kit/firmware/devices/havpe/assets/call_ended.wav",
-    "apps/kit/firmware/devices/satellite1/it's here.c",
-    "apps/kit/firmware/devices/zectrix_note4/extra.cmake",
-    "apps/kit/firmware/platforms/host/include/esp_log.h",
+    "firmware/devices/havpe/assets/call_ended.wav",
+    "firmware/devices/satellite1/it's here.c",
+    "firmware/devices/zectrix_note4/extra.cmake",
+    "firmware/platforms/host/include/esp_log.h",
   ]);
 });
 
@@ -484,10 +484,10 @@ function firmwareRepository() {
         "components/x/src/x.c",
         "components/x/tests/x_test.c",
         "README.md",
-      ].map((file) => [`apps/kit/firmware/${file}`, file]),
+      ].map((file) => [`firmware/${file}`, file]),
     ),
   );
-  commit({ "apps/kit/scripts/firmware-release.ts": "// the builder" });
+  commit({ "scripts/firmware-release.ts": "// the builder" });
 
   return {
     commit,

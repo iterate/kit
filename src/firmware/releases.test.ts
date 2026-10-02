@@ -4,7 +4,7 @@ import { newestFirmware, newestFirmwareVersion } from "./releases.ts";
 
 const device = findFirmwareDevice("waveshare")!;
 const refsUrl =
-  "https://api.github.com/repos/iterate/iterate/git/matching-refs/tags/kit-firmware/waveshare/";
+  "https://api.github.com/repos/iterate/kit/git/matching-refs/tags/kit-firmware/waveshare/";
 const older = "002570-2026-09-20-0a1b2c3";
 const newer = "002574-2026-09-23-b2a4558";
 

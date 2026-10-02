@@ -7,7 +7,7 @@ import {
 
 /**
  * Serves `/firmware/<device id>/<version>/<file>`, one file of a firmware release, streamed from
- * `https://github.com/iterate/iterate/releases/download/kit-firmware/<device id>/<version>/<file>`;
+ * `https://github.com/iterate/kit/releases/download/kit-firmware/<device id>/<version>/<file>`;
  * `null` for every other path.
  *
  * Why a proxy: esp-web-tools 10.4.0 `fetch()`es the manifest and every part from the page
