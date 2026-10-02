@@ -100,7 +100,7 @@ test("loadFirmwareManifest: refuses a manifest Kit could not serve", async () =>
 });
 
 // the builder's output is the contract this module reads
-test("loadFirmwareManifest: loads what apps/kit/scripts/firmware-release.ts publishes", async () => {
+test("loadFirmwareManifest: loads what scripts/firmware-release.ts publishes", async () => {
   stubKitPage();
   const device = findFirmwareDevice(DEFAULT_DEVICE_ID)!;
   const version = "002574-2026-09-23-b2a4558";

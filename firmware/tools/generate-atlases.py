@@ -14,8 +14,8 @@ What IS committed, per pack, in components/avatar/assets/:
 
 Usage (stdlib python3 only, no dependencies):
 
-  python3 apps/kit/firmware/tools/generate-atlases.py            # assets -> src
-  python3 apps/kit/firmware/tools/generate-atlases.py extract    # src -> assets
+  python3 firmware/tools/generate-atlases.py            # assets -> src
+  python3 firmware/tools/generate-atlases.py extract    # src -> assets
 
 `extract` is the inverse tool that produced the assets from the original
 generated C in the first place; it round-trips through the emitter and fails

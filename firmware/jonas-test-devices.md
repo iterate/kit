@@ -20,7 +20,7 @@ firmware are documented in [NOTE4 board notes](devices/zectrix_note4/README.md).
 Resolve a device's current port passively from the repository root:
 
 ```sh
-apps/kit/firmware/tools/port-for-mac.sh D8:3B:DA:46:20:34
+firmware/tools/port-for-mac.sh D8:3B:DA:46:20:34
 ```
 
 `esptool read_mac` and serial monitors can reset a board. Identify it through

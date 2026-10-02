@@ -32,7 +32,7 @@ The normal minimum is four files:
 3. `targets/<board>/CMakeLists.txt`
 4. `targets/<board>/sdkconfig.defaults`
 
-To ship it, add the board to `apps/kit/src/firmware/catalog.ts` (its `target` is the
+To ship it, add the board to `src/firmware/catalog.ts` (its `target` is the
 `devices/` and `targets/` directory name) and merge; Kit Firmware publishes its first
 release. Do not put
 credentials in firmware defaults or an artifact; the installer writes the
@@ -44,7 +44,7 @@ Source assets live in `components/avatar/assets/<slug>.png` and `.json`.
 Add the corresponding public atlas header and CMake source name, then run:
 
 ```sh
-pnpm --dir apps/kit firmware:configure
+pnpm firmware:configure
 ```
 
 It generates ignored atlas C sources and the catalogue include. Do not edit

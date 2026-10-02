@@ -18,7 +18,7 @@ test("the catalog lists the seven boards Kit releases, each once", () => {
   expect(ids).toEqual([...new Set(ids)]);
 });
 
-// apps/kit/scripts/firmware-release.ts builds firmware/targets/<target> and counts both directories
+// scripts/firmware-release.ts builds firmware/targets/<target> and counts both directories
 // as that board's own inputs
 test.for(firmwareCatalog)("$id has its own target and device directories", ({ target }) => {
   const firmware = join(import.meta.dirname, "../../firmware");

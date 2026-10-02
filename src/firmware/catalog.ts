@@ -9,8 +9,9 @@ export const FIRMWARE_REPOSITORY = "iterate/kit";
 
 /**
  * A release version: `<first-parent commit count, zero-padded to 6>-<UTC committer date>-<commit
- * sha7>`, e.g. `002574-2026-09-23-b2a4558`. Main is linear, so the count only grows and versions
- * sort as strings; the date is for people. It is also the firmware's `PROJECT_VER`, so it must fit
+ * sha7>`, e.g. `003104-2026-10-02-b2a4558`. The count includes iterate/iterate's commits before Kit
+ * moved here (scripts/firmware-release.ts `COMMITS_BEFORE_THE_MOVE`). Main is linear, so the count
+ * only grows and versions sort as strings; the date is for people. It is also the firmware's `PROJECT_VER`, so it must fit
  * the 31 characters of `esp_app_desc_t.version`, which the device reports in `X-Iterate-Fw`.
  */
 export const FIRMWARE_VERSION_PATTERN = /^\d{6}-\d{4}-\d{2}-\d{2}-[0-9a-f]{7}$/;

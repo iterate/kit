@@ -24,7 +24,7 @@ remote client: `itx.clients.zectrix_note4`.
 Activate the ESP-IDF release that `scripts/ci/esp-idf.sh` pins, then run:
 
 ```sh
-idf.py -C apps/kit/firmware/targets/zectrix_note4 \
+idf.py -C firmware/targets/zectrix_note4 \
   -B /tmp/iterate-note4-voice -D IDF_TARGET=esp32s3 \
   -D SDKCONFIG=/tmp/iterate-note4-voice.sdkconfig build
 ```
@@ -58,7 +58,7 @@ as busy. The last chunk is answered once the refresh has shown or failed;
 stops refreshes until reboot. Status updates coalesce; mono uses a full
 refresh every twentieth update and after grayscale. Uploaded images remain
 until cleared. Drawing instructions:
-[screen-context.md](../../../../../packages/voice/src/screen-context.md).
+[screen-context.md](https://github.com/iterate/packages/blob/main/packages/voice/src/screen-context.md).
 
 The driver retains five 535-byte vendor calibration tables and shade mapping,
 verified against the reference. Mono uses controller OTP waveforms; unused
