@@ -22,7 +22,7 @@ export default defineConfig({
   ],
 });
 
-/** THE WORKER'S CONFIG for an envs.ts env (CLOUDFLARE_ENV, which `pnpm deploy` sets), or for local
+/** THE WORKER'S CONFIG for an envs.ts env (CLOUDFLARE_ENV, which `pnpm run deploy` sets), or for local
  *  dev with none: prd's links, which a gitignored `.dev.vars` overrides
  *  (`APP_CONFIG_URLS__OS=http://localhost:8788`). `vite build` snapshots it into
  *  dist/server/wrangler.json, what a deploy ships. */

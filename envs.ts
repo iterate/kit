@@ -1,5 +1,5 @@
 /** Kit's deployments. vite.config.ts turns one into the Worker's config (there is no wrangler
- *  file), and `pnpm deploy --env <name>` ships it (scripts/app.ts). Secrets live in Doppler project
+ *  file), and `pnpm run deploy --env <name>` ships it (scripts/app.ts). Secrets live in Doppler project
  *  `kit`, one config per deployment; the deploy reads its Cloudflare token there.
  *
  *  Plain data, importing nothing: scripts/firmware-release.ts imports it under plain `node` before

@@ -21,3 +21,7 @@ onlyBuiltDependencies:
   - lightningcss
   - sharp
   - workerd
+# iterate's own patch, copied with Kit: a ZodError's message survives structuredClone and Durable
+# Object RPC (the BrowserSession the SDK's app-session runs), where zod's lazy getter left it empty.
+patchedDependencies:
+  zod@4.6.5: patches/zod@4.6.5.patch

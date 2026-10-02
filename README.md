@@ -127,7 +127,7 @@ another platform (`APP_CONFIG_URLS__OS=http://localhost:8788`, `src/app/config.t
   (kit.iterate-dev-preview.workers.dev, signed in against iterate's main on dev)
   and `prd` (k.iterate.com). Every main push that changes what the Worker ships
   deploys `preview`, then `prd` (`.depot/workflows/deploy.yml`);
-  `pnpm deploy --env <name>` does the same by hand, with the Cloudflare token from
+  `pnpm run deploy --env <name>` does the same by hand, with the Cloudflare token from
   Doppler project `kit`. Nothing is created or deleted: the Workers and k.iterate.com's
   DNS record already exist.
 - **CI** is Depot CI (`.depot/workflows/`), with one secret, `DOPPLER_TOKEN`.
