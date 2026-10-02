@@ -133,7 +133,8 @@ another platform (`APP_CONFIG_URLS__OS=http://localhost:8788`, `src/app/config.t
 - **CI** is Depot CI (`.depot/workflows/`), with one secret, `DOPPLER_TOKEN`.
 - **The iterate platform.** Kit is an OAuth client of an iterate platform
   ([iterate/core](https://github.com/iterate/core)). It installs the `iterate` SDK and
-  `@iterate-com/voice` from pkg.pr.new, pinned to a commit of iterate's monorepo, and
+  `@iterate-com/voice` from pkg.pr.new, pinned to a commit of iterate's monorepo, which
+  publishes from iterate/private (`pkg.pr.new/iterate/private/<package>@<full sha>`), and
   its components from shadcn and the registry in
   [iterate/packages](https://github.com/iterate/packages)
   (`pnpm exec shadcn add iterate/packages/<name>`). The files under `src/app/` are

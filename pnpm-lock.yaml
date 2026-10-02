@@ -17,8 +17,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@iterate-com/voice':
-        specifier: https://pkg.pr.new/iterate/iterate/@iterate-com/voice@a5a07e8
-        version: https://pkg.pr.new/iterate/iterate/@iterate-com/voice@a5a07e8(iterate@https://pkg.pr.new/iterate/iterate/iterate@a5a07e8(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))
+        specifier: https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32
+        version: https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32(iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))
       '@tanstack/react-query':
         specifier: ^5.103.2
         version: 5.104.0(react@19.3.0)
@@ -38,8 +38,8 @@ importers:
         specifier: ^10.4.0
         version: 10.4.0
       iterate:
-        specifier: https://pkg.pr.new/iterate/iterate/iterate@a5a07e8
-        version: https://pkg.pr.new/iterate/iterate/iterate@a5a07e8(react@19.3.0)
+        specifier: https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32
+        version: https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0)
       lucide-react:
         specifier: ^1.48.0
         version: 1.49.0(@types/react@19.3.0)(react@19.3.0)
@@ -853,8 +853,8 @@ packages:
   '@iterate-com/capnweb@0.12.3':
     resolution: {integrity: sha512-puzZnzPziu7bh3ysr4/rRWeH4oMQD5iacoMdDReJoUxxbkSiFMcTIpbLvUXeWwrG4kupVMv7n1bsokREyNLlxA==}
 
-  '@iterate-com/voice@https://pkg.pr.new/iterate/iterate/@iterate-com/voice@a5a07e8':
-    resolution: {tarball: https://pkg.pr.new/iterate/iterate/@iterate-com/voice@a5a07e8}
+  '@iterate-com/voice@https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32':
+    resolution: {tarball: https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32}
     version: 0.1.0
     peerDependencies:
       iterate: '*'
@@ -2404,8 +2404,8 @@ packages:
     resolution: {integrity: sha512-6B3tLtFqtQS4ekarvLVMZ+X+VlvQekbe4taUkf/rhVO3d/h0M2rfARm/pXLcPEsjjMsFgrFgSrhQIxcSVrBz8w==}
     engines: {node: '>=18'}
 
-  iterate@https://pkg.pr.new/iterate/iterate/iterate@a5a07e8:
-    resolution: {tarball: https://pkg.pr.new/iterate/iterate/iterate@a5a07e8}
+  iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32:
+    resolution: {tarball: https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32}
     version: 0.4.1
     engines: {node: '>=22.18'}
     hasBin: true
@@ -4110,9 +4110,9 @@ snapshots:
 
   '@iterate-com/capnweb@0.12.3': {}
 
-  '@iterate-com/voice@https://pkg.pr.new/iterate/iterate/@iterate-com/voice@a5a07e8(iterate@https://pkg.pr.new/iterate/iterate/iterate@a5a07e8(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))':
+  '@iterate-com/voice@https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32(iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))':
     dependencies:
-      iterate: https://pkg.pr.new/iterate/iterate/iterate@a5a07e8(react@19.3.0)
+      iterate: https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0)
       pako: 3.0.2
       zod: 4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86)
 
@@ -5470,7 +5470,7 @@ snapshots:
 
   isexe@3.1.5: {}
 
-  iterate@https://pkg.pr.new/iterate/iterate/iterate@a5a07e8(react@19.3.0):
+  iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0):
     dependencies:
       capnweb: '@iterate-com/capnweb@0.12.3'
       json5: 2.2.3
