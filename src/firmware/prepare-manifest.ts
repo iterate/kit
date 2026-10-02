@@ -11,7 +11,7 @@ import { firmwareManifestPath } from "./catalog.ts";
  * them against.
  *
  * The manifest is a standard esp-web-tools manifest (https://esphome.github.io/esp-web-tools/) plus
- * `configurationPartition`, as apps/kit/scripts/firmware-release.ts `firmwareManifest` writes it.
+ * `configurationPartition`, as scripts/firmware-release.ts `firmwareManifest` writes it.
  */
 export async function loadFirmwareManifest(
   release: { deviceId: string; version: string },

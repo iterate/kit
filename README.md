@@ -1,4 +1,7 @@
-# Iterate Kit
+# iterate Kit
+
+Firmware for iterate's voice boards, and the browser installer that flashes it. Kit moved here
+from iterate's monorepo, iterate/iterate, in October 2026, with its history.
 
 Kit Flasher is the browser installer at `https://k.iterate.com` for the
 supported ESP32-S3 voice boards: HA Voice PE, FutureProofHomes Satellite1, M5StickS3,
@@ -53,9 +56,12 @@ button or optional wake word.
 
 Every firmware change merged to main becomes a GitHub release of each board it
 affects, tagged `kit-firmware/<device id>/<version>`, for example
-`kit-firmware/home-assistant-voice-preview-edition/002574-2026-09-23-b2a4558`. The
+`kit-firmware/home-assistant-voice-preview-edition/003104-2026-10-02-b2a4558`. The
 version is main's first-parent commit count (six digits), the UTC commit date and
 the short sha, so versions sort as strings; the board reports it in `X-Iterate-Fw`.
+The count includes iterate/iterate's commits before the move (`COMMITS_BEFORE_THE_MOVE`
+in `scripts/firmware-release.ts`): each board's last release there,
+`003103-2026-10-02-bbd8934`, was copied here, and versions count on from it.
 A release holds the build's flash files and `manifest.json`, a standard
 [esp-web-tools manifest](https://esphome.github.io/esp-web-tools/) with one extra
 field, `configurationPartition`, where Kit writes the install's configuration
@@ -68,37 +74,67 @@ other boards' `devices/<board>` and `targets/<board>`, the host and Mac code, th
 tests and the docs (`firmwareInputs`). A build fails when the board read a tracked
 file outside its inputs, changed a tracked file, or produced a flash layout that
 disagrees with its own partition table. Each board builds in its own leg, so main
-releases in about 5 minutes. Releases are never marked Latest; the daily `v…`
-release stays the repository's Latest. A pull request that touches firmware runs
-the same builds and lists what it would publish.
+releases in about 5 minutes. Releases are never marked Latest: each board has its
+own. A pull request that touches firmware runs the same builds and lists what it
+would publish.
 
 - **Recovery.** Every run compares each board with its newest release, so the
   daily 05:17 UTC run (or the next firmware push) releases what a failed run left
-  behind. A failure on main posts to Slack.
+  behind. A failure on main posts to #error-pulse (`scripts/ci/page.ts`).
 - **Builder changes.** `scripts/firmware-release.ts` is not a release input. After
   changing it, dispatch Kit Firmware on main with `devices=all` to rebuild every board.
 - **Yanking.** Merge the fix first, which releases a newer version, then
-  `gh release delete <tag> --cleanup-tag --yes` (an admin, once a tag ruleset
-  protects `kit-firmware/**`). Deleting first makes the next run
+  `gh release delete <tag> --cleanup-tag --yes` (an admin: the "Kit firmware
+  tags" ruleset protects `kit-firmware/**`, which only admins and Depot's app may
+  create or delete). Deleting first makes the next run
   rebuild the bad commit, since the planner then compares with the older release.
 - **Stray drafts.** A publish killed mid-upload can leave a draft release. Drafts
   have no tag, so nothing lists them; delete it in the releases page.
-- **Bench builds.** `node apps/kit/scripts/firmware-release.ts build --device <id>
---out /tmp/kit-<id>` (`pnpm firmware:build` in `apps/kit`) with ESP-IDF active; see the
+- **Bench builds.** `node scripts/firmware-release.ts build --device <id>
+--out /tmp/kit-<id>` (`pnpm firmware:build`) with ESP-IDF active; see the
   [firmware guide](./firmware/README.md#release-and-proof).
 
-Kit flashes only each board's newest `kit-firmware/` release of iterate/iterate,
+Kit flashes only each board's newest `kit-firmware/` release of this repository,
 which the Kit Firmware workflow creates; no older release can be chosen. The page
 finds it from GitHub's public API in the browser (`src/firmware/releases.ts`), so
 the Worker holds no GitHub token. The Worker streams each release file from
 `/firmware/<device id>/<version>/<file>` (`src/firmware/firmware-proxy.ts`),
 because GitHub's download URLs send no CORS headers; the page checks the manifest
 (`src/firmware/prepare-manifest.ts`) and adds the install's configuration image
-at flash time. Production, the per-PR previews and `pnpm dev` all flash the same
-releases with no setup, and deploying Kit builds no firmware.
+at flash time. Production, the preview and `pnpm dev` all flash the same releases
+with no setup, and deploying Kit builds no firmware. The repository must stay
+public: boards and browsers download its releases without signing in.
 
 For board structure, hardware requirements, host tests (`pnpm firmware:test:host`)
 and air-path proof, see the [firmware guide](./firmware/README.md). The installer
 does not replace that hardware validation. Host tests need cmake and are not part
-of Kit's `pnpm test`, which runs the installer's Vitest suite; CI's Test job runs
-both on every PR.
+of Kit's `pnpm test`, which runs the installer's Vitest suite; CI runs both on
+every PR.
+
+## Working on Kit
+
+```sh
+pnpm install
+pnpm dev                 # the installer, signing in against os.iterate.com
+pnpm typecheck && pnpm lint && pnpm format:check && pnpm test
+pnpm firmware:test:host  # needs cmake
+```
+
+`pnpm dev` signs in against production; a gitignored `.dev.vars` points it at
+another platform (`APP_CONFIG_URLS__OS=http://localhost:8788`, `src/app/config.ts`).
+
+- **Deploys.** `envs.ts` holds the two deployments: `preview`
+  (kit.iterate-dev-preview.workers.dev, signed in against iterate's main on dev)
+  and `prd` (k.iterate.com). Every main push that changes what the Worker ships
+  deploys `preview`, then `prd` (`.depot/workflows/deploy.yml`);
+  `pnpm run deploy --env <name>` does the same by hand, with the Cloudflare token from
+  Doppler project `kit`. Nothing is created or deleted: the Workers and k.iterate.com's
+  DNS record already exist.
+- **CI** is Depot CI (`.depot/workflows/`), with one secret, `DOPPLER_TOKEN`.
+- **The iterate platform.** Kit is an OAuth client of an iterate platform
+  ([iterate/core](https://github.com/iterate/core)). It installs the `iterate` SDK and
+  `@iterate-com/voice` from pkg.pr.new, pinned to a commit of iterate's monorepo, and
+  its components from shadcn and the registry in
+  [iterate/packages](https://github.com/iterate/packages)
+  (`pnpm exec shadcn add iterate/packages/<name>`). The files under `src/app/` are
+  trimmed copies from iterate's monorepo; each says where it came from.

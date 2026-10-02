@@ -1,7 +1,7 @@
 import { skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { UseMutationResult } from "@tanstack/react-query";
-import { Button } from "@iterate-com/ui/components/ui/button";
-import { Checkbox } from "@iterate-com/ui/components/ui/checkbox";
+import { Button } from "#/components/ui/button.tsx";
+import { Checkbox } from "#/components/ui/checkbox.tsx";
 import {
   Dialog,
   DialogClose,
@@ -10,14 +10,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@iterate-com/ui/components/ui/dialog";
-import {
-  Field,
-  FieldContent,
-  FieldDescription,
-  FieldLabel,
-} from "@iterate-com/ui/components/ui/field";
-import { Spinner } from "@iterate-com/ui/components/ui/spinner";
+} from "#/components/ui/dialog.tsx";
+import { Field, FieldContent, FieldDescription, FieldLabel } from "#/components/ui/field.tsx";
+import { Spinner } from "#/components/ui/spinner.tsx";
 import { UsbIcon } from "lucide-react";
 import type { FirmwareDevice } from "../firmware/catalog.ts";
 import type { DeviceConfiguration, StatusVoice } from "../firmware/config-image.ts";

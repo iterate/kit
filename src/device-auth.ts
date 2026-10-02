@@ -1,7 +1,7 @@
 import { appSession, issuerOriginOf, sessionCookieName, startAppSession } from "iterate/app-server";
 import type { BrowserSession } from "iterate/app-session";
 import { isLocalOrigin, sameOriginPath } from "iterate/lib";
-import { kitEnvs } from "../../../envs.ts";
+import { kitEnvs } from "../envs.ts";
 import { findFirmwareDevice } from "./firmware/catalog.ts";
 
 /** Kit chooses a fresh client BEFORE consent. The stored identity then follows setup to the board.

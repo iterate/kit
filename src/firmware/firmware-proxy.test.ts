@@ -29,7 +29,7 @@ test("streams a release file from GitHub with only Kit's own headers", async () 
   );
 
   expect(fetchGitHub).toHaveBeenCalledExactlyOnceWith(
-    `https://github.com/iterate/iterate/releases/download/kit-firmware/${device}/${version}/bootloader.bin`,
+    `https://github.com/iterate/kit/releases/download/kit-firmware/${device}/${version}/bootloader.bin`,
   );
   expect(response).toMatchObject({ status: 200 });
   expect(Object.fromEntries(response!.headers)).toEqual({
@@ -107,7 +107,7 @@ test("answers any other GitHub failure with 502 and logs it", async () => {
 
   expect(response?.status).toBe(502);
   expect(error).toHaveBeenCalledExactlyOnceWith("kit.firmware_download_failed", {
-    url: `https://github.com/iterate/iterate/releases/download/kit-firmware/${device}/${version}/bootloader.bin`,
+    url: `https://github.com/iterate/kit/releases/download/kit-firmware/${device}/${version}/bootloader.bin`,
     status: 500,
   });
 });

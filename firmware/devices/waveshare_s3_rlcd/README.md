@@ -22,7 +22,7 @@ The panel needs ambient light; it has no backlight and is not e-paper.
 Activate the ESP-IDF release that `scripts/ci/esp-idf.sh` pins, then run:
 
 ```sh
-idf.py -C apps/kit/firmware/targets/waveshare_s3_rlcd \
+idf.py -C firmware/targets/waveshare_s3_rlcd \
   -B /tmp/iterate-rlcd-voice -D IDF_TARGET=esp32s3 \
   -D SDKCONFIG=/tmp/iterate-rlcd-voice.sdkconfig build
 ```
@@ -49,7 +49,7 @@ and writes only complete frames. ST7305 command **0x20** gives the required
 a frame as it takes it, so the last chunk is answered at once. Health exposes
 uploads and failures.
 HTML, fonts and conversion stay on the server. The
-[drawing guide](../../../../../packages/voice/src/screen-context.md)
+[drawing guide](https://github.com/iterate/packages/blob/main/packages/voice/src/screen-context.md)
 is supplied through the screen capability, with a licensed ASCII pixel font
 embedded in project KV; it needs no external font fetch.
 

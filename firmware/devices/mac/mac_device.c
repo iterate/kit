@@ -11,7 +11,7 @@
  *
  *   iterate-kit-mac --config cfg.bin [--name mac] [--no-aec]
  *
- * `cfg.bin` is the ITERKIT1 image apps/kit/scripts/config-image.ts writes for
+ * `cfg.bin` is the ITERKIT1 image scripts/config-image.ts writes for
  * a board. Space or return presses the button; q leaves. Over the wire the
  * device is `itx.clients.<name>` like every board — scripts/voice-board.ts
  * starts its conversation and speaks to it. VoiceProcessingIO cancels what
@@ -203,7 +203,7 @@ static int usage(FILE *to) {
       "Usage: iterate-kit-mac --config <image> [--name <device name>] [--no-aec]\n"
       "\n"
       "Runs the Kit voice loop on this Mac as a device. <image> is the ITERKIT1\n"
-      "provisioning image apps/kit/scripts/config-image.ts writes. Space or\n"
+      "provisioning image scripts/config-image.ts writes. Space or\n"
       "return presses the button; q leaves.\n",
       to);
   return to == stdout ? 0 : 2;

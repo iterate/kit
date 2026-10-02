@@ -88,14 +88,14 @@ during initial negotiation and refresh its supply mode after contract changes.
 Satellite1 shows the integration: its speaker rating and amplifier gain stay
 in the board, independently of the reusable PD driver.
 
-Register the board once in `apps/kit/src/firmware/catalog.ts`: its id, which
+Register the board once in `src/firmware/catalog.ts`: its id, which
 is also its `.device_name` (`catalog.test.ts` checks), name, vendor, `target`
 directory and how a call starts. The release builder takes the chip and flash
 layout from the build's `flasher_args.json` and checks them against the build's
 own partition table, which needs one `iterate_kit` configuration partition.
 Provide its checked-in chime assets if it uses them. The browser selector and
 the release builder consume the catalog. The air-path proof,
-`apps/agents/scripts/voice-board.ts`, takes the board's `itx.clients` name on
+`apps/agents/scripts/voice-board.ts` in iterate's monorepo, takes the board's `itx.clients` name on
 `--device` and needs no registration.
 
 ## Remote screens
@@ -109,7 +109,7 @@ answers the chunk that completes the frame only once the hardware has shown it
 16-level grayscale (`gray4`) and big-endian RGB565 use row-major pixels with
 each row padded to whole bytes. Panel-native packing belongs to the driver.
 
-`packages/voice/src/screen.ts` validates metadata and converts
+[`@iterate-com/voice`'s `src/screen.ts`](https://github.com/iterate/packages/blob/main/packages/voice/src/screen.ts) validates metadata and converts
 browser PNGs at the advertised resolution; `voice.setImage` waits for a bounded
 refresh acknowledgment. E-paper submits to a separate task so image updates
 cannot stall voice capture, playback or button handling. StackChan lends its
@@ -154,12 +154,12 @@ the target directory. Use a fresh generated SDK config after changing defaults
 or partitions:
 
 ```sh
-cd apps/kit/firmware/targets/<board>
+cd firmware/targets/<board>
 idf.py -B /tmp/iterate-kit-<board> -D IDF_TARGET=esp32s3 \
   -D SDKCONFIG=/tmp/iterate-kit-<board>.sdkconfig build
 ```
 
-Run shared checks from `apps/kit`:
+Run shared checks from the repository root:
 
 ```sh
 pnpm firmware:test:host
@@ -167,7 +167,7 @@ pnpm firmware:test:host
 
 ### The Mac as a board
 
-`pnpm firmware:build:host` (from `apps/kit`) configures and builds every host
+`pnpm firmware:build:host` configures and builds every host
 target into `firmware/.build/host`, `iterate-kit-mac` among them. It runs the
 voice loop the ESP boards run, with the Mac's hardware behind the same
 interfaces: CoreAudio behind the codec interface (`platforms/darwin/darwin_audio_codec.c`),
@@ -177,7 +177,6 @@ loop's two audio tasks on one thread — a control step, two capture steps and a
 playback step every 5 ms — the way the voice loop tests pump them.
 
 ```sh
-cd apps/kit
 pnpm firmware:build:host
 firmware/.build/host/iterate-kit-mac --config /tmp/cfg.bin --name mac
 ```
@@ -202,7 +201,7 @@ OS URL, the project id and a personal access token scoped to that project. Kit
 writes it as it flashes the board ([Kit's README](../README.md#what-a-person-needs)
 says how the token is minted and revoked). A bench board, or `iterate-kit-mac
 --config`, gets the same image from the same encoder
-(`src/firmware/config-image.ts`), run from `apps/kit`:
+(`src/firmware/config-image.ts`), run from the repository root:
 
 ```sh
 node scripts/config-image.ts image \
@@ -263,7 +262,7 @@ ready. Microphone and speaker events travel directly through that stream.
 Every board lends `system.update({url, sha256})`. Nothing calls it on its own,
 and Kit has no update button: an update is a call made by whoever holds the
 board's project, such as an agent in that project, or a script that connects the
-way `apps/agents/scripts/voice-board.ts` does:
+way `apps/agents/scripts/voice-board.ts` in iterate's monorepo does:
 
 ```ts
 await root.clients[device].system.update({
@@ -276,7 +275,7 @@ await root.clients[device].system.update({
 `sha256` is that file's digest. GitHub lists it for each release asset:
 
 ```sh
-gh api "repos/iterate/iterate/releases/tags/kit-firmware/<device id>/<version>" \
+gh api "repos/iterate/kit/releases/tags/kit-firmware/<device id>/<version>" \
   --jq '.assets[] | select(.name == "iterate-kit-<target>.bin") | .digest'
 ```
 
@@ -313,7 +312,7 @@ fails if the board reads a tracked file outside them.
 For a bench build of the same thing, from the repository root with ESP-IDF active:
 
 ```sh
-node apps/kit/scripts/firmware-release.ts build --device <id> --out /tmp/kit-<id>
+node scripts/firmware-release.ts build --device <id> --out /tmp/kit-<id>
 cd /tmp/kit-<id>/release/assets
 esptool.py --chip esp32s3 write_flash \
   $(jq -r '.builds[0].parts[]|"\(.offset) \(.path|ltrimstr("./"))"' manifest.json) \
@@ -335,15 +334,15 @@ service, secret or network access.
 Prove code before publishing a release:
 
 ```sh
-pnpm --dir apps/kit firmware:test:host
-cd apps/kit/firmware/targets/<board> && idf.py build
+pnpm firmware:test:host
+cd firmware/targets/<board> && idf.py build
 ```
 
 Then use a provisioned, idle device — a board or `iterate-kit-mac` — for the
 air-path proof:
 
 ```sh
-cd apps/agents
+cd apps/agents  # in iterate's monorepo
 WORKER_BASE_URL=https://os.iterate.com ITERATE_BEARER_TOKEN=itk_… PROJECT=prj-voice \
   node scripts/voice-board.ts --device <device_name> \
     --prompt "Hello there. Please reply with the single word banana." --expect banana
@@ -351,7 +350,7 @@ WORKER_BASE_URL=https://os.iterate.com ITERATE_BEARER_TOKEN=itk_… PROJECT=prj-
 
 `ITERATE_BEARER_TOKEN` is a personal access token for the device's project
 (the Dash's Sessions page, or `pnpm exec iterate --config prd tokens create`;
-[credentials](../../../core/os/docs/credentials.md)).
+[credentials](https://github.com/iterate/core/blob/main/core/os/docs/credentials.md)).
 `voice-board.ts` asks the device to start a conversation (a remote press),
 speaks the prompt out of this Mac's speaker so the device's microphone has to
 hear it, watches the conversation for what the provider heard and said back,

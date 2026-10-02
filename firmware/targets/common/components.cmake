@@ -1,4 +1,4 @@
-# CI passes -D PROJECT_VER=<release version> (apps/kit/scripts/firmware-release.ts); hand builds say "dev"
+# CI passes -D PROJECT_VER=<release version> (scripts/firmware-release.ts); hand builds say "dev"
 # instead of ESP-IDF's `git describe` fallback, which now sees kit-firmware/* tags.
 # https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-reference/system/misc_system_api.html#app-version
 if(NOT DEFINED PROJECT_VER)

@@ -1,7 +1,7 @@
 /**
  * Kit writes this image only to a board's newest firmware release, so it matches the decoder on
  * main and nothing older once that board's release catches up (a few minutes after Kit deploys);
- * see apps/kit/firmware/AGENTS.md.
+ * see firmware/AGENTS.md.
  */
 const CONFIG_MAGIC = "ITERKIT1";
 const CONFIG_HEADER_BYTES = 16;
@@ -135,7 +135,7 @@ export function encodeDeviceConfiguration(
         value: configuration.iterate.projectId,
         maxBytes: projectIdMaxBytes,
         /* The project's minted id (`prj_<hex>`), held to the charset every projectId is
-         * (core/os/src/context/paths.ts `PROJECT_ID`), as `configuration.c` holds it. */
+         * (`PROJECT_ID` in iterate's core/os/src/context/paths.ts), as `configuration.c` holds it. */
         validate: (value) => /^[A-Za-z0-9_-]+$/.test(value),
       },
       {

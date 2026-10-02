@@ -2,21 +2,16 @@ import type { ComponentProps } from "react";
 import { skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, getRouteApi } from "@tanstack/react-router";
 import { z } from "zod";
-import { Button } from "@iterate-com/ui/components/ui/button";
-import {
-  Field,
-  FieldContent,
-  FieldDescription,
-  FieldLabel,
-} from "@iterate-com/ui/components/ui/field";
-import { Input } from "@iterate-com/ui/components/ui/input";
+import { Button } from "#/components/ui/button.tsx";
+import { Field, FieldContent, FieldDescription, FieldLabel } from "#/components/ui/field.tsx";
+import { Input } from "#/components/ui/input.tsx";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
-} from "@iterate-com/ui/components/ui/input-group";
-import { IterateLogo } from "@iterate-com/ui/components/iterate-logo";
+} from "#/components/ui/input-group.tsx";
+import { IterateLogo } from "#/components/iterate-logo.tsx";
 import {
   Select,
   SelectContent,
@@ -24,7 +19,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@iterate-com/ui/components/ui/select";
+} from "#/components/ui/select.tsx";
 import { EyeIcon, EyeOffIcon, LogOutIcon, UsbIcon } from "lucide-react";
 import { ensureVoiceAgent } from "@iterate-com/voice/install";
 import { SetupWizard, type SetupInput } from "../../components/setup-wizard.tsx";

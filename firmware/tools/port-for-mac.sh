@@ -1,7 +1,7 @@
 #!/bin/sh
 # Resolve a board's serial port from its ROM MAC, without touching the board.
 #
-#   idf.py -p "$(apps/kit/firmware/tools/port-for-mac.sh D8:3B:DA:46:20:34)" flash
+#   idf.py -p "$(firmware/tools/port-for-mac.sh D8:3B:DA:46:20:34)" flash
 #
 # TWO WAYS THIS GOES WRONG, and this script exists to stop both.
 #

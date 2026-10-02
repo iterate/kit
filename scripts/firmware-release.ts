@@ -1,4 +1,4 @@
-// apps/kit/scripts/firmware-release.ts — KIT FIRMWARE SHIPS AS PER-DEVICE GITHUB RELEASES, tagged
+// scripts/firmware-release.ts — KIT FIRMWARE SHIPS AS PER-DEVICE GITHUB RELEASES, tagged
 // `kit-firmware/<device id>/<version>` (catalog.ts `firmwareReleaseTag`, `FIRMWARE_VERSION_PATTERN`).
 // Each release carries the build's flash files and a standard esp-web-tools `manifest.json`.
 //
@@ -15,8 +15,8 @@
 //   3. The workflow's publish job, the only one allowed to write, creates the releases from those files
 //      with gh on main, and only lists them anywhere else.
 //
-//   node apps/kit/scripts/firmware-release.ts plan --devices changed|all --publish true|false [--base <sha>]
-//   node apps/kit/scripts/firmware-release.ts build --device <id> [--version dev] [--previous <version>] --out <dir>
+//   node scripts/firmware-release.ts plan --devices changed|all --publish true|false [--base <sha>]
+//   node scripts/firmware-release.ts build --device <id> [--version dev] [--previous <version>] --out <dir>
 //
 // It runs under plain `node` (Node 24 strips the types) before anything is installed, so it imports
 // only node:*, the catalog and envs.ts (for Kit's production URL).
@@ -42,7 +42,7 @@ import {
 import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { kitEnvs } from "../../../envs.ts";
+import { kitEnvs } from "../envs.ts";
 import {
   FIRMWARE_REPOSITORY,
   FIRMWARE_VERSION_PATTERN,
@@ -52,24 +52,35 @@ import {
   type FirmwareDevice,
 } from "../src/firmware/catalog.ts";
 
-const FIRMWARE_DIRECTORY = "apps/kit/firmware";
+const FIRMWARE_DIRECTORY = "firmware";
 
 /**
  * A change to any of these rebuilds every device on a pull request (the builder is not a release input:
  * changing it on main releases nothing until a dispatch with `devices=all`).
  */
 const FIRMWARE_BUILDER = [
-  "apps/kit/scripts/firmware-release.ts",
+  "scripts/firmware-release.ts",
   ".depot/workflows/kit-firmware.yml",
   "scripts/ci/esp-idf.sh",
 ];
+
+/**
+ * What a version's count adds to this repo's first-parent commit count: the commits iterate/iterate's
+ * main had before Kit moved here. Main here starts with apps/kit's history filtered out of
+ * iterate/iterate (99 commits, ending at 5a0e46f, the copy of iterate/iterate@bbd8934, its 3103rd),
+ * and every board's newest release there was copied here at that commit, as
+ * `kit-firmware/<device id>/003103-2026-10-02-bbd8934`. Counting on from 3103 keeps every new version
+ * sorting after them.
+ */
+const COMMITS_BEFORE_THE_MOVE = 3103 - 99;
 
 /** A published release of one device, as `git ls-remote` lists it. */
 type FirmwareRelease = { deviceId: string; version: string; commit: string };
 
 /**
- * The version of the checked-out commit (`FIRMWARE_VERSION_PATTERN`): its first-parent commit count,
- * its UTC committer date and its short sha, e.g. `002574-2026-09-23-b2a4558`.
+ * The version of the checked-out commit (`FIRMWARE_VERSION_PATTERN`): its first-parent commit count
+ * (`COMMITS_BEFORE_THE_MOVE` included), its UTC committer date and its short sha, e.g.
+ * `003104-2026-10-02-b2a4558`.
  */
 export function firmwareVersion(input: { count: number; date: Date; commit: string }) {
   const count = String(input.count).padStart(6, "0");
@@ -318,7 +329,7 @@ type Partition = ReturnType<typeof readPartitionTable>[number];
  * A release's `manifest.json`: a standard esp-web-tools manifest (https://esphome.github.io/esp-web-tools/)
  * whose part paths are relative to the manifest, plus `configurationPartition`, the region Kit fills
  * with the install's configuration image at flash time. Kit flashes only a board's newest release, so
- * the manifest names no configuration format (apps/kit/firmware/AGENTS.md).
+ * the manifest names no configuration format (firmware/AGENTS.md).
  */
 export function firmwareManifest(input: {
   device: FirmwareDevice;
@@ -397,7 +408,7 @@ export function ninjaPaths(input: {
 
 /**
  * The tracked firmware files a build read that its device's inputs do not cover, sorted. `read`,
- * `tracked` (`git ls-files apps/kit/firmware`) and `covered` (`git ls-files <firmwareInputs>`) are
+ * `tracked` (`git ls-files firmware`) and `covered` (`git ls-files <firmwareInputs>`) are
  * repository-relative, so untracked and generated files never count.
  */
 export function filesOutsideInputs(input: {
@@ -434,10 +445,9 @@ export function buildFirmwareRelease(input: {
     throw new Error(`Version ${version} was not planned for this checkout (${head}).`);
   }
   const treeBefore = firmwareTreeStatus(repoRoot);
-  const app = join(repoRoot, "apps/kit");
   const build = join(out, "build");
   // the avatar atlases are generated and gitignored (components/avatar/src/.gitignore)
-  run("python3", ["firmware/tools/generate-atlases.py"], app);
+  run("python3", ["firmware/tools/generate-atlases.py"], repoRoot);
   run(
     "idf.py",
     [
@@ -445,7 +455,7 @@ export function buildFirmwareRelease(input: {
       ...["-D", "IDF_TARGET=esp32s3", "-D", `SDKCONFIG=${join(out, "sdkconfig")}`],
       ...["-D", `PROJECT_VER=${version}`, "build"],
     ],
-    app,
+    repoRoot,
   );
 
   // Written by ESP-IDF's own build (tools/cmake/project_description.json.in); a different shape
@@ -495,7 +505,7 @@ export function buildFirmwareRelease(input: {
       [
         `The ${device.target} build read tracked files outside its inputs, so a change to them would not release it:`,
         ...outside.map((file) => `  ${file}`),
-        "Widen `firmwareInputs` in apps/kit/scripts/firmware-release.ts, or stop reading them.",
+        "Widen `firmwareInputs` in scripts/firmware-release.ts, or stop reading them.",
       ].join("\n"),
     );
   }
@@ -537,7 +547,7 @@ export function buildFirmwareRelease(input: {
       {
         tag: firmwareReleaseTag(device.id, version),
         title: `${device.name} firmware ${version}`,
-        // where apps/kit/src/firmware/firmware-proxy.ts serves the assets once published
+        // where src/firmware/firmware-proxy.ts serves the assets once published
         kitUrl: `${kitEnvs.prd.baseUrl}/firmware/${device.id}/${version}/`,
       },
       null,
@@ -550,7 +560,9 @@ export function buildFirmwareRelease(input: {
       `${device.name} (\`${device.id}\`) firmware ${version}, built from ${head} with ESP-IDF ${description.git_revision}.`,
       "",
       previous
-        ? `Changes since ${previous}: https://github.com/${FIRMWARE_REPOSITORY}/compare/${previous.slice(-7)}...${head}`
+        ? // from the previous release's tag, not its version's sha: the releases copied from
+          // iterate/iterate name a commit there (COMMITS_BEFORE_THE_MOVE)
+          `Changes since ${previous}: https://github.com/${FIRMWARE_REPOSITORY}/compare/${firmwareReleaseTag(device.id, previous)}...${head}`
         : "First release for this device.",
       "",
       `Flash it with Kit: ${kitEnvs.prd.baseUrl}/?device=${device.id}`,
@@ -662,7 +674,7 @@ function output(command: string, args: readonly string[], cwd: string) {
 }
 
 if (import.meta.main) {
-  const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
   const { positionals, values } = parseArgs({
     allowPositionals: true,
     options: {
@@ -685,7 +697,9 @@ if (import.meta.main) {
     }
     const head = git(repoRoot, "rev-parse", "HEAD");
     const headVersion = firmwareVersion({
-      count: Number(git(repoRoot, "rev-list", "--count", "--first-parent", "HEAD")),
+      count:
+        COMMITS_BEFORE_THE_MOVE +
+        Number(git(repoRoot, "rev-list", "--count", "--first-parent", "HEAD")),
       date: new Date(Number(git(repoRoot, "log", "-1", "--format=%ct", "HEAD")) * 1000),
       commit: head,
     });
