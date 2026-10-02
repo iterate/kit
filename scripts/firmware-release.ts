@@ -64,12 +64,23 @@ const FIRMWARE_BUILDER = [
   "scripts/ci/esp-idf.sh",
 ];
 
+/**
+ * What a version's count adds to this repo's first-parent commit count: the commits iterate/iterate's
+ * main had before Kit moved here. Main here starts with apps/kit's history filtered out of
+ * iterate/iterate (99 commits, ending at 5a0e46f, the copy of iterate/iterate@bbd8934, its 3103rd),
+ * and every board's newest release there was copied here at that commit, as
+ * `kit-firmware/<device id>/003103-2026-10-02-bbd8934`. Counting on from 3103 keeps every new version
+ * sorting after them.
+ */
+const COMMITS_BEFORE_THE_MOVE = 3103 - 99;
+
 /** A published release of one device, as `git ls-remote` lists it. */
 type FirmwareRelease = { deviceId: string; version: string; commit: string };
 
 /**
- * The version of the checked-out commit (`FIRMWARE_VERSION_PATTERN`): its first-parent commit count,
- * its UTC committer date and its short sha, e.g. `002574-2026-09-23-b2a4558`.
+ * The version of the checked-out commit (`FIRMWARE_VERSION_PATTERN`): its first-parent commit count
+ * (`COMMITS_BEFORE_THE_MOVE` included), its UTC committer date and its short sha, e.g.
+ * `003104-2026-10-02-b2a4558`.
  */
 export function firmwareVersion(input: { count: number; date: Date; commit: string }) {
   const count = String(input.count).padStart(6, "0");
@@ -549,7 +560,9 @@ export function buildFirmwareRelease(input: {
       `${device.name} (\`${device.id}\`) firmware ${version}, built from ${head} with ESP-IDF ${description.git_revision}.`,
       "",
       previous
-        ? `Changes since ${previous}: https://github.com/${FIRMWARE_REPOSITORY}/compare/${previous.slice(-7)}...${head}`
+        ? // from the previous release's tag, not its version's sha: the releases copied from
+          // iterate/iterate name a commit there (COMMITS_BEFORE_THE_MOVE)
+          `Changes since ${previous}: https://github.com/${FIRMWARE_REPOSITORY}/compare/${firmwareReleaseTag(device.id, previous)}...${head}`
         : "First release for this device.",
       "",
       `Flash it with Kit: ${kitEnvs.prd.baseUrl}/?device=${device.id}`,
@@ -684,7 +697,9 @@ if (import.meta.main) {
     }
     const head = git(repoRoot, "rev-parse", "HEAD");
     const headVersion = firmwareVersion({
-      count: Number(git(repoRoot, "rev-list", "--count", "--first-parent", "HEAD")),
+      count:
+        COMMITS_BEFORE_THE_MOVE +
+        Number(git(repoRoot, "rev-list", "--count", "--first-parent", "HEAD")),
       date: new Date(Number(git(repoRoot, "log", "-1", "--format=%ct", "HEAD")) * 1000),
       commit: head,
     });

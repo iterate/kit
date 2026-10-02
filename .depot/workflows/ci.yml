@@ -1,0 +1,59 @@
+name: CI
+
+# The checks every pull request and main push runs: the installer's typecheck, lint, format and
+# Vitest suite, and the firmware compiled for the host (ASan/UBSan) and run under CTest. Board builds
+# are Kit Firmware's (kit-firmware.yml).
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    name: Typecheck, lint and test
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Setup
+        uses: ./.depot/actions/setup
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        if: ${{ !cancelled() }}
+        run: pnpm lint
+      - name: Format
+        if: ${{ !cancelled() }}
+        run: pnpm format:check
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: pnpm test
+
+  firmware-host-tests:
+    name: Firmware host tests
+    # The stock image has cmake and GCC's sanitizers.
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Setup Node
+        run: bash scripts/ci/toolchain.sh start && bash scripts/ci/toolchain.sh wait
+      - name: Run the firmware host tests
+        run: pnpm firmware:test:host

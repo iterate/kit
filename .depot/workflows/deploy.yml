@@ -1,0 +1,78 @@
+name: Deploy
+
+# KIT AT MAIN: every main push that changes what the Worker ships deploys `preview`
+# (kit.iterate-dev-preview.workers.dev) and then, once that answers, `prd` (k.iterate.com), both from
+# envs.ts. Firmware ships as GitHub releases (kit-firmware.yml), never in the Worker. A red run pages.
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**"
+      - "!firmware/**"
+      - "!**/*.md"
+  workflow_dispatch:
+
+jobs:
+  preview:
+    name: Deploy preview
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Setup
+        uses: ./.depot/actions/setup
+      - name: Deploy
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: pnpm run-script deploy --env preview
+
+  # only after preview answered: a deploy that fails there never reaches k.iterate.com
+  prd:
+    name: Deploy prd
+    needs: preview
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Setup
+        uses: ./.depot/actions/setup
+      - name: Deploy
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: pnpm run-script deploy --env prd
+
+  page:
+    needs:
+      - preview
+      - prd
+    if: always() && github.ref == 'refs/heads/main' && contains(needs.*.result, 'failure')
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: bash scripts/ci/toolchain.sh start && bash scripts/ci/toolchain.sh wait
+      - name: Page #error-pulse
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci/page.ts

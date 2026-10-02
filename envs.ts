@@ -30,7 +30,8 @@ export const kitEnvs = {
   // and flashes the same GitHub releases as production (src/firmware/releases.ts).
   preview: {
     cloudflareAccountId: PREVIEW_AND_DEV_ACCOUNT_ID,
-    dopplerConfig: "preview",
+    // kit/dev inherits _shared/dev, whose Cloudflare token deploys to the dev/preview account
+    dopplerConfig: "dev",
     workerName: "kit",
     baseUrl: "https://kit.iterate-dev-preview.workers.dev",
     os: "https://os.iterate-dev-preview.workers.dev",
