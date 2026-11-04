@@ -1357,6 +1357,12 @@ static void bind_device_if_ready(void) {
     return;
   }
   runtime.voice_stream_generation = runtime.connection.generation;
+  /* A rebind under a call already pressed (a remount) follows that call: the
+   * relay has it, so there is nothing to press again. */
+  if (runtime.activation_live && runtime.call_started_sent) {
+    iterate_kit_voice_stream_follow_call(
+        runtime.voice_stream, runtime.activation, runtime.opening_outcome == OPENING_ACCEPTED);
+  }
 }
 
 static void device_provisioned(void *context, const struct capnweb_result *result) {

@@ -198,6 +198,13 @@ enum capnweb_status iterate_kit_voice_stream_start_call(
     struct iterate_kit_voice_stream *voice_stream,
     const char *activation);
 
+/** Filter a rebound subscription to a call already pressed, without pressing
+ *  again: `accepted` says whether the relay had already accepted it. */
+void iterate_kit_voice_stream_follow_call(
+    struct iterate_kit_voice_stream *voice_stream,
+    const char *activation,
+    bool accepted);
+
 /** Fence the current call locally: none of its events pass the filter any
  *  more. The subscription stays for the next call. */
 void iterate_kit_voice_stream_end_call(struct iterate_kit_voice_stream *voice_stream);

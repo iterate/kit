@@ -293,6 +293,8 @@ static void quiescent(void) {
 static size_t answered;
 /* Provisioning the device (`ensureVoiceDevice`) is answered, or refused once. */
 static bool refuse_device_provisioning;
+/* The next subscription open is refused, once. */
+static bool refuse_next_subscribe;
 static bool defer_stream_get;
 static long deferred_stream_get_id;
 struct open_connection {
@@ -406,6 +408,7 @@ static void remember_pending_stream_capability(long capability) {
 static void pump(void) {
   int round;
   bool device_reply_pending = false;
+  bool subscribe_refused = false;
   char stream_get_path[160] = "";
   for (round = 0; round < 40; ++round) {
     struct iterate_kit_itx_connection *connection =
@@ -423,6 +426,10 @@ static void pump(void) {
         enqueue_open_connection(
             strtol(exported + strlen("[\"export\","), NULL, 10),
             stream_path_for_capability(target));
+        if (refuse_next_subscribe) {
+          subscribe_refused = true;
+          refuse_next_subscribe = false;
+        }
       }
       if (strncmp(message, "[\"release\",", sizeof("[\"release\",") - 1U) == 0) {
         const long released = strtol(message + sizeof("[\"release\",") - 1U, NULL, 10);
@@ -456,7 +463,14 @@ static void pump(void) {
       {
         char reply[256];
         const long id = strtol(pull + strlen("[\"pull\","), NULL, 10);
-        if (device_reply_pending) {
+        if (subscribe_refused) {
+          (void)snprintf(reply, sizeof(reply),
+              "[\"reject\",%ld,[\"error\",\"Error\",\"subscription refused\"]]", id);
+          memmove(&pending_open_connections[0], &pending_open_connections[1],
+              (pending_open_connection_count - 1U) * sizeof(pending_open_connections[0]));
+          --pending_open_connection_count;
+          subscribe_refused = false;
+        } else if (device_reply_pending) {
           if (refuse_device_provisioning) {
             (void)snprintf(reply, sizeof(reply),
                 "[\"reject\",%ld,[\"error\",\"Error\",\"voice is not installed\"]]", id);
@@ -712,6 +726,9 @@ static void deliver_ended_latest(void) {
 
 /* --- the tests ------------------------------------------------------------ */
 
+/* A press on the wire: the event itself, never a subscription that names its type. */
+#define PRESS "\"type\":\"events.iterate.com/voice-agent/call-started\""
+
 /*
  * THE ONE THAT WOULD HAVE SAVED THE AFTERNOON.
  *
@@ -878,7 +895,7 @@ static void the_press_is_one_append_on_the_provisioned_device(void) {
   speak_frames(1U);
   run_ms(50U);
   (void)snprintf(activation_a, sizeof(activation_a), "%s", current_activation());
-  press_a = first_sent_after_containing(before, "voice-agent/call-started");
+  press_a = first_sent_after_containing(before, PRESS);
   assert(press_a < iterate_kit_fake_platform_sent_count());
   {
     char keyed[128];
@@ -899,8 +916,8 @@ static void the_press_is_one_append_on_the_provisioned_device(void) {
   speak_frames(1U);
   run_ms(50U);
   assert(strcmp(current_activation(), activation_a) != 0);
-  press_b = first_sent_after_containing(press_a + 1U, "voice-agent/call-started");
-  assert(first_sent_after_containing(before, "voice-agent/call-ended") < press_b);
+  press_b = first_sent_after_containing(press_a + 1U, PRESS);
+  assert(first_sent_after_containing(before, "\"type\":\"events.iterate.com/voice-agent/call-ended\"") < press_b);
   assert(!sent_after_contains(before, "[\"subscribe\"]"));
   quiescent();
 }
@@ -1023,14 +1040,46 @@ static void b_waits_for_a_terminal_before_its_press(void) {
   iterate_kit_fake_platform_drain_control_outbox();
   step();
   run_ms(100U);
-  terminal = first_sent_after_containing(after_b_capture, "voice-agent/call-ended");
-  b_press = first_sent_after_containing(after_b_capture, "voice-agent/call-started");
+  terminal = first_sent_after_containing(after_b_capture, "\"type\":\"events.iterate.com/voice-agent/call-ended\"");
+  b_press = first_sent_after_containing(after_b_capture, PRESS);
   b_microphone = first_sent_after_containing(after_b_capture, "\"pcm\":");
   assert(terminal < b_press);
   assert(b_press < b_microphone);
   assert(b_microphone < iterate_kit_fake_platform_sent_count());
   assert(sent_microphone_to_stream(after_b_capture, "/voice/host_test"));
   assert(!sent_after_contains(after_b_capture, "[\"subscribe\"]"));
+  quiescent();
+}
+
+/* A subscription that fails mid-call is mounted again and follows the same
+ * call: nothing is pressed twice, and the call's own events pass again. */
+static void a_remount_mid_call_follows_the_call_without_a_second_press(void) {
+  size_t before;
+  quiescent();
+  before = iterate_kit_fake_platform_sent_count();
+  remote_call("conversation", "start");
+  step();
+  pump();
+  speak_frames(1U);
+  run_ms(50U);
+  deliver_accepted_latest();
+  step();
+  /* An answer begins and stalls: the loop opens a fresh subscription, which is refused. */
+  deliver_speaker_frame(false);
+  refuse_next_subscribe = true;
+  run_ms(ITERATE_KIT_VOICE_DOWNLINK_SILENCE_MS + 1000U);
+  pump();
+  run_ms(ITERATE_KIT_VOICE_REMOUNT_RETRY_MS + 500U);
+  pump();
+  run_ms(200U);
+  pump();
+  assert(board.last_view.wants_call);
+  assert(sent_after_count(before, PRESS) == 1U);
+  /* The relay ends the call; the remounted subscription delivers it. */
+  deliver_ended_latest();
+  step();
+  step();
+  assert(!board.last_view.wants_call);
   quiescent();
 }
 
@@ -1058,7 +1107,7 @@ static void a_refused_provisioning_is_asked_again_and_the_press_waits(void) {
   step();
   speak_frames(1U);
   run_ms(100U);
-  assert(!sent_after_contains(after_reconnect, "voice-agent/call-started"));
+  assert(!sent_after_contains(after_reconnect, PRESS));
   assert(!sent_after_contains(after_reconnect, "\"pcm\":"));
 
   /* The backoff runs out, provisioning answers, and the waiting press goes. */
@@ -1068,7 +1117,7 @@ static void a_refused_provisioning_is_asked_again_and_the_press_waits(void) {
   pump();
   run_ms(100U);
   assert(sent_after_count(after_reconnect, "ensureVoiceDevice") == 2U);
-  assert(sent_after_contains(after_reconnect, "voice-agent/call-started"));
+  assert(sent_after_contains(after_reconnect, PRESS));
   assert(sent_microphone_to_stream(after_reconnect, "/voice/host_test"));
   quiescent();
 }
@@ -1372,6 +1421,7 @@ int main(void) {
   losing_the_session_ends_the_call_and_the_next_press_opens_a_new_one();
   b_waits_for_a_terminal_before_its_press();
   a_refused_provisioning_is_asked_again_and_the_press_waits();
+  a_remount_mid_call_follows_the_call_without_a_second_press();
   /* Last: a failed send ends the session under it. */
   failed_microphone_append_ends_the_activation();
   return 0;

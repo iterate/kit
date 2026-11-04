@@ -752,6 +752,16 @@ enum capnweb_status iterate_kit_voice_stream_start_call(
   return CAPNWEB_OK;
 }
 
+void iterate_kit_voice_stream_follow_call(
+    struct iterate_kit_voice_stream *voice_stream,
+    const char *activation,
+    bool accepted) {
+  if (voice_stream == NULL || !valid_activation(activation)) return;
+  (void)snprintf(voice_stream->activation, sizeof(voice_stream->activation), "%s", activation);
+  voice_stream->call_active = accepted;
+  voice_stream->answer_open = false;
+}
+
 void iterate_kit_voice_stream_end_call(struct iterate_kit_voice_stream *voice_stream) {
   if (voice_stream == NULL) return;
   voice_stream->activation[0] = '\0';

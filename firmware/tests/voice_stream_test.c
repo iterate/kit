@@ -832,6 +832,37 @@ static void a_bound_device_passes_only_its_pressed_calls_events(void) {
 
 /* The terminal callback can synchronously fence the call. Audio later in its
  * batch is already obsolete and must not get as far as the speaker callback. */
+/* A subscription bound again under a pressed call follows it, accepted state
+ * included, without a second press. */
+static void a_rebound_subscription_follows_the_pressed_call(void) {
+  struct fixture fixture;
+  size_t before;
+  fixture_init(&fixture);
+  start_and_mount(&fixture);
+  accept_call(&fixture, -1, 1, 1);
+  assert(iterate_kit_voice_stream_close(&fixture.voice_stream) == CAPNWEB_OK);
+  release_server_callback(&fixture, latest_callback_id(&fixture));
+  assert(iterate_kit_voice_stream_bind(&fixture.voice_stream,
+      &(const struct iterate_kit_voice_stream_options){
+        .stream_path = "/voice/dev_test", .now_ms = fixture_now_ms, .clock_context = &fixture,
+        .on_control = record_control,
+      }, &fixture.stream, &fixture.subscription) == CAPNWEB_OK);
+  resolve_latest_pull(&fixture, "[\"export\",-14]");
+  iterate_kit_voice_stream_update(&fixture.voice_stream);
+  assert(fixture.voice_stream.state == ITERATE_KIT_VOICE_STREAM_READY);
+  assert(!fixture.voice_stream.call_active);
+  before = fixture.captured_count;
+  iterate_kit_voice_stream_follow_call(&fixture.voice_stream, TEST_ACTIVATION, true);
+  assert(fixture.captured_count == before);
+  assert(fixture.voice_stream.call_active);
+  /* A quiet accepted call still says it is there. */
+  fixture.clock_ms = ITERATE_KIT_VOICE_CALL_KEEPALIVE_MS + 1U;
+  assert(iterate_kit_voice_stream_keepalive_if_due(&fixture.voice_stream) == CAPNWEB_OK);
+  assert(strstr(fixture.captured[before], "voice-agent/keepalive") != NULL);
+  assert(iterate_kit_voice_stream_close(&fixture.voice_stream) == CAPNWEB_OK);
+  release_server_callback(&fixture, latest_callback_id(&fixture));
+}
+
 static void terminal_fence_stops_later_events_in_its_batch(void) {
   struct fixture fixture;
   size_t frames;
@@ -999,6 +1030,7 @@ int main(void) {
   repeated_silent_renewals_start_with_no_batches();
   fenced_voice_stream_ignores_late_callback();
   a_bound_device_passes_only_its_pressed_calls_events();
+  a_rebound_subscription_follows_the_pressed_call();
   terminal_fence_stops_later_events_in_its_batch();
   close_waits_for_server_callback_before_slot_reuse();
   append_frames_keeps_one_padded_base64_body();
