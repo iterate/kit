@@ -92,11 +92,8 @@ enum iterate_kit_voice_stream_failure {
 };
 
 struct iterate_kit_voice_stream_options {
-  /** Stream path for the call, e.g.
-   *  "/agents/voice/waveshare/2026-09-28-101500-<activation>". */
+  /** The device's relay context, "/voice/<client>": the same for every call. */
   const char *stream_path;
-  /** Client-owned, RAM-only activation for the local microphone edge. */
-  const char *activation;
   /** Monotonic clock in milliseconds; stamps every frame and every deadline. */
   uint64_t (*now_ms)(void *clock_context);
   void *clock_context;
@@ -116,21 +113,24 @@ struct iterate_kit_voice_stream;
 
 /**
  * The device end of the voice_stream stream protocol over ONE Cap'n Web session:
- * a caller-owned child `cd(path)` context and its subscription, then
- * one-way `append` calls carrying ephemeral
+ * the device's relay context (`/voice/<client>`, caller-owned) and ONE
+ * subscription to it for every call of the connection, then one-way `append`
+ * calls: `call-started` for each press, and ephemeral
  * `events.iterate.com/voice-agent/mic-frame` events (base64 PCM16, one event
  * per wall-clock flush, any even byte length).
  *
- * Send microphone frames while a call is open; the first frame opens it and
- * GPT-Live detects turns. Send a quiet-call keepalive, play speaker frames in
- * order, and clear playout when directed. A local end appends
- * `call-ended` for that activation.
+ * `start_call` is the press: one append, after which microphone frames may go
+ * at once. Only the current call's events pass the subscription's filter. Send
+ * a quiet-call keepalive, play speaker frames in order, and clear playout when
+ * directed. A local end appends `call-ended` for that activation.
  *
  * Single-owner, callback-driven, no internal retry — the enclosing
  * connection owns reconnect policy, mirroring iterate_kit_itx_mount.
  */
 struct iterate_kit_voice_stream {
   struct iterate_kit_voice_stream_options options;
+  /** The call in progress, or empty: only its events pass the filter. */
+  char activation[65];
   /* Borrowed logical child resources. They share the permanent mount session. */
   struct iterate_kit_stream *stream;
   struct iterate_kit_stream_subscription *subscription;
@@ -176,18 +176,38 @@ struct iterate_kit_voice_stream {
 };
 
 /**
- * Bind a call to an already-ready child stream and open its logical downlink
- * subscription. Both objects are caller-owned and must remain allocated until
+ * Bind the device's already-ready relay context and open its logical downlink
+ * subscription, once per connection: every call of the connection rides it.
+ * Both objects are caller-owned and must remain allocated until
  * `iterate_kit_voice_stream_close()` and their respective reclaimable predicates
- * succeed. Close detaches only the subscription: the caller closes the
- * borrowed stream after any queued terminal has been appended. This does not
- * touch the permanent WebSocket or mount.
+ * succeed. Close detaches only the subscription. This does not touch the
+ * permanent WebSocket or mount.
  */
 enum capnweb_status iterate_kit_voice_stream_bind(
     struct iterate_kit_voice_stream *voice_stream,
     const struct iterate_kit_voice_stream_options *options,
     struct iterate_kit_stream *stream,
     struct iterate_kit_stream_subscription *subscription);
+
+/**
+ * THE PRESS: append `call-started` for `activation`, the device's one append
+ * that opens a call, and filter the downlink to it. Microphone frames may
+ * follow at once; nothing waits for an answer. Refused unless bound and ready.
+ */
+enum capnweb_status iterate_kit_voice_stream_start_call(
+    struct iterate_kit_voice_stream *voice_stream,
+    const char *activation);
+
+/** Filter a rebound subscription to a call already pressed, without pressing
+ *  again: `accepted` says whether the relay had already accepted it. */
+void iterate_kit_voice_stream_follow_call(
+    struct iterate_kit_voice_stream *voice_stream,
+    const char *activation,
+    bool accepted);
+
+/** Fence the current call locally: none of its events pass the filter any
+ *  more. The subscription stays for the next call. */
+void iterate_kit_voice_stream_end_call(struct iterate_kit_voice_stream *voice_stream);
 
 /** Mirrors the borrowed subscription state into the call state. Call from the
  * owner loop before deciding whether capture may flush. */

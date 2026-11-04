@@ -42,9 +42,7 @@ static bool valid_activation(const char *value) {
 
 static bool valid_stream_options(
     const struct iterate_kit_voice_stream_options *options) {
-  return options != NULL && nonempty(options->stream_path) &&
-      valid_activation(options->activation) &&
-      options->now_ms != NULL;
+  return options != NULL && nonempty(options->stream_path) && options->now_ms != NULL;
 }
 
 static bool payload_matches_activation(
@@ -53,11 +51,11 @@ static bool payload_matches_activation(
   struct capnweb_value value;
   char activation[65];
   size_t length = 0U;
-  return valid_activation(voice_stream->options.activation) &&
+  return valid_activation(voice_stream->activation) &&
       capnweb_value_object_get(payload, "activation", &value) &&
       capnweb_value_copy_string(
           &value, activation, sizeof(activation), &length) == CAPNWEB_OK &&
-      strcmp(activation, voice_stream->options.activation) == 0;
+      strcmp(activation, voice_stream->activation) == 0;
 }
 
 static enum capnweb_status fail(
@@ -496,8 +494,8 @@ enum capnweb_status iterate_kit_voice_stream_bind(
   voice_stream->last_event_offset = -1;
   voice_stream->last_delivery_through = -1;
   voice_stream->subscription_epoch = voice_stream->connection_generation;
-  key_length = snprintf(key, sizeof(key), "kit-voice-%s-%" PRIu32,
-      options->activation, voice_stream->subscription_epoch);
+  key_length = snprintf(key, sizeof(key), "kit-voice-%" PRIu32,
+      voice_stream->subscription_epoch);
   if (key_length < 0 || (size_t)key_length >= sizeof(key)) {
     return fail(voice_stream, ITERATE_KIT_VOICE_STREAM_FAILURE_OPEN_CALL, CAPNWEB_E_LIMIT);
   }
@@ -549,8 +547,8 @@ enum capnweb_status iterate_kit_voice_stream_recycle_subscription(
   }
   if (voice_stream->connection_generation == UINT32_MAX) return CAPNWEB_E_LIMIT;
   ++voice_stream->connection_generation;
-  key_length = snprintf(key, sizeof(key), "kit-voice-%s-%" PRIu32,
-      voice_stream->options.activation, voice_stream->connection_generation);
+  key_length = snprintf(key, sizeof(key), "kit-voice-%" PRIu32,
+      voice_stream->connection_generation);
   if (key_length < 0 || (size_t)key_length >= sizeof(key)) return CAPNWEB_E_LIMIT;
   voice_stream->previous_subscription = voice_stream->subscription;
   voice_stream->subscription = fresh_subscription;
@@ -690,11 +688,14 @@ static bool json_literal_contents_are_safe(const char *value) {
 
 static enum capnweb_status iterate_kit_voice_stream_send_keepalive(
     struct iterate_kit_voice_stream *voice_stream) {
-  static const char args[] =
+  char args[160];
+  const int length = snprintf(args, sizeof(args),
       "[{\"type\":\"events.iterate.com/voice-agent/keepalive\",\"ephemeral\":true,"
-      "\"payload\":{}}]";
+      "\"payload\":{\"activation\":\"%s\"}}]",
+      voice_stream->activation);
+  if (length < 0 || (size_t)length >= sizeof(args)) return CAPNWEB_E_LIMIT;
   const enum capnweb_status status = iterate_kit_stream_append(
-      voice_stream->stream, args, sizeof(args) - 1U);
+      voice_stream->stream, args, (size_t)length);
   if (status == CAPNWEB_OK) {
     voice_stream->last_presence_at_ms =
         voice_stream->options.now_ms(voice_stream->options.clock_context);
@@ -704,7 +705,8 @@ static enum capnweb_status iterate_kit_voice_stream_send_keepalive(
 
 bool iterate_kit_voice_stream_downlink_expected(
     const struct iterate_kit_voice_stream *voice_stream) {
-  return voice_stream != NULL && (!voice_stream->call_active || voice_stream->answer_open);
+  return voice_stream != NULL && valid_activation(voice_stream->activation) &&
+      (!voice_stream->call_active || voice_stream->answer_open);
 }
 
 enum capnweb_status iterate_kit_voice_stream_keepalive_if_due(
@@ -712,7 +714,9 @@ enum capnweb_status iterate_kit_voice_stream_keepalive_if_due(
   uint64_t now;
   if (voice_stream == NULL) return CAPNWEB_E_INVALID_ARGUMENT;
   if (voice_stream->state != ITERATE_KIT_VOICE_STREAM_READY ||
-      !voice_stream->call_active) return CAPNWEB_E_STATE;
+      !voice_stream->call_active || !valid_activation(voice_stream->activation)) {
+    return CAPNWEB_E_STATE;
+  }
   now = voice_stream->options.now_ms(voice_stream->options.clock_context);
   if (voice_stream->last_presence_at_ms != 0U &&
       now - voice_stream->last_presence_at_ms <
@@ -720,6 +724,50 @@ enum capnweb_status iterate_kit_voice_stream_keepalive_if_due(
     return CAPNWEB_OK;
   }
   return iterate_kit_voice_stream_send_keepalive(voice_stream);
+}
+
+enum capnweb_status iterate_kit_voice_stream_start_call(
+    struct iterate_kit_voice_stream *voice_stream,
+    const char *activation) {
+  char arguments[256];
+  int length;
+  enum capnweb_status status;
+  if (voice_stream == NULL || !valid_activation(activation)) {
+    return CAPNWEB_E_INVALID_ARGUMENT;
+  }
+  if (voice_stream->state != ITERATE_KIT_VOICE_STREAM_READY) return CAPNWEB_E_STATE;
+  /* Keyed by the activation, so a press the transport sends twice opens one call. */
+  length = snprintf(arguments, sizeof(arguments),
+      "[{\"type\":\"events.iterate.com/voice-agent/call-started\","
+      "\"idempotencyKey\":\"voice-agent/call:%s\",\"payload\":{\"activation\":\"%s\"}}]",
+      activation, activation);
+  if (length < 0 || (size_t)length >= sizeof(arguments)) return CAPNWEB_E_LIMIT;
+  status = iterate_kit_stream_append(voice_stream->stream, arguments, (size_t)length);
+  if (status != CAPNWEB_OK) return status;
+  (void)snprintf(voice_stream->activation, sizeof(voice_stream->activation), "%s", activation);
+  voice_stream->call_active = false;
+  voice_stream->answer_open = false;
+  voice_stream->last_presence_at_ms =
+      voice_stream->options.now_ms(voice_stream->options.clock_context);
+  return CAPNWEB_OK;
+}
+
+void iterate_kit_voice_stream_follow_call(
+    struct iterate_kit_voice_stream *voice_stream,
+    const char *activation,
+    bool accepted) {
+  if (voice_stream == NULL || !valid_activation(activation)) return;
+  (void)snprintf(voice_stream->activation, sizeof(voice_stream->activation), "%s", activation);
+  voice_stream->call_active = accepted;
+  voice_stream->answer_open = false;
+}
+
+void iterate_kit_voice_stream_end_call(struct iterate_kit_voice_stream *voice_stream) {
+  if (voice_stream == NULL) return;
+  voice_stream->activation[0] = '\0';
+  voice_stream->call_active = false;
+  voice_stream->answer_open = false;
+  voice_stream->last_presence_at_ms = 0U;
 }
 
 enum capnweb_status iterate_kit_voice_stream_end_activation(

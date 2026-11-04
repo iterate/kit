@@ -200,18 +200,6 @@ static size_t answered;
 static long pending_open_callback;
 static long open_connection_callback;
 
-static bool copy_setup_stream_path(const char *message, char *out, size_t capacity) {
-  const char *field = strstr(message, "\"streamPath\":\"");
-  size_t length;
-  if (field == NULL) return false;
-  field += strlen("\"streamPath\":\"");
-  length = strcspn(field, "\"");
-  if (length == 0U || length >= capacity) return false;
-  memcpy(out, field, length);
-  out[length] = '\0';
-  return true;
-}
-
 /*
  * ANSWER WHATEVER THE DEVICE ASKED, THE WAY A LIVE /api WOULD — the same pump
  * `voice_loop_intent_test.c` uses, for the same reason: the mount chain's
@@ -219,7 +207,7 @@ static bool copy_setup_stream_path(const char *message, char *out, size_t capaci
  */
 static void pump(void) {
   int round;
-  char setup_stream_path[160] = "";
+  bool device_reply_pending = false;
   for (round = 0; round < 40; ++round) {
     struct iterate_kit_itx_connection *connection =
         iterate_kit_fake_platform_connection();
@@ -234,26 +222,22 @@ static void pump(void) {
         pending_open_callback =
             strtol(exported + strlen("[\"export\","), NULL, 10);
       }
-      if (strstr(message, "setupVoiceAgent") != NULL) {
-        assert(copy_setup_stream_path(
-            message, setup_stream_path, sizeof(setup_stream_path)));
+      if (strstr(message, "ensureVoiceDevice") != NULL) {
         /* Named for its client; a board without a screen sends none. */
-        assert(strncmp(setup_stream_path, "/agents/voice/host_test_open_mic/",
-                       sizeof("/agents/voice/host_test_open_mic/") - 1U) == 0);
+        assert(strstr(message, "\"client\":\"host_test_open_mic\"") != NULL);
         assert(strstr(message, "\"screen\"") == NULL);
+        device_reply_pending = true;
       }
       if (pull == NULL) continue;
       {
         char reply[256];
         const long id = strtol(pull + strlen("[\"pull\","), NULL, 10);
-        if (setup_stream_path[0] != '\0') {
-          (void)snprintf(
-              reply,
-              sizeof(reply),
-              "[\"resolve\",%ld,{\"streamPath\":\"%s\",\"warmMs\":0}]",
-              id,
-              setup_stream_path);
-          setup_stream_path[0] = '\0';
+        if (device_reply_pending) {
+          (void)snprintf(reply, sizeof(reply),
+              "[\"resolve\",%ld,{\"path\":\"/voice/host_test_open_mic\","
+              "\"agentPath\":\"/agents/voice/host_test_open_mic\"}]",
+              id);
+          device_reply_pending = false;
         } else {
           const long capability = -(id + 10);
           (void)snprintf(
@@ -445,7 +429,7 @@ static void deliver_accepted(void) {
       "[\"push\",[\"pipeline\",%ld,[],[[["
       "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\","
       "\"offset\":%lld,"
-      "\"payload\":{\"activation\":\"%s\",\"conversationId\":\"convtest\",\"handshakeTookMs\":1}}"
+      "\"payload\":{\"activation\":\"%s\",\"handshakeTookMs\":1}}"
       "]],{\"after\":%lld,\"through\":%lld}]]]",
       callback_export_id(),
       offset,

@@ -138,8 +138,9 @@ enum {
   /* A board's DMA ring depth reaches the loop only as
    * `facts->speaker_dry_wait_ms`, which is read on every dry wait. */
   FRAME_BYTES = ITERATE_KIT_VOICE_FRAME_BYTES,
-  /* One local activation gets one finite opening attempt. */
-  OPENING_DEADLINE_MS = 20000U,
+  /* One local activation gets one finite opening attempt: the relay's own
+   * deadline is 5 s from its dial, and the press costs it nothing. */
+  OPENING_DEADLINE_MS = 5000U,
   MIC_QUEUE_DEPTH = ITERATE_KIT_VOICE_MIC_QUEUE_DEPTH,
   /* Covers WakeNet plus board-poll handoff without retaining idle room audio. */
   MIC_PRE_ROLL_FRAMES = 25,
@@ -183,13 +184,13 @@ EXT_RAM_BSS_ATTR static uint8_t
 EXT_RAM_BSS_ATTR static uint8_t
     outbox_storage_psram[CONTROL_OUTBOX_SLOTS][CONTROL_OUTBOX_SLOT_CAPACITY];
 
-/* One fresh child stream per activation; the client mount itself is stable. */
+/* The device's relay context, "/voice/<client>": the same for every call. */
 static char stream_path[160];
 /* "itx.clients.<device name>" — the itx expression this board answers. */
 static char capability_match[ITERATE_KIT_ITX_MOUNT_CAPABILITY_MATCH_CAPACITY];
 /*
- * Its client name, the part after "itx.clients.": what names this board's calls
- * (`/agents/voice/<client>/<UTC>-<activation>`) and its screen to voice.
+ * Its client name, the part after "itx.clients.": what names this board's two
+ * contexts to voice (`/voice/<client>`, `/agents/voice/<client>`) and its screen.
  */
 static const char *const client_name =
     capability_match + sizeof("itx.clients.") - 1U;
@@ -305,9 +306,10 @@ EXT_RAM_BSS_ATTR static struct {
   struct iterate_kit_peer peer;
   /* conversation.start()/end(): latched edges, taken with the board's poll. */
   struct iterate_kit_conversation_control conversation_control;
-  struct iterate_kit_voice_stream voice_streams[2];
+  struct iterate_kit_voice_stream voice_stream_storage;
   struct iterate_kit_voice_stream *voice_stream;
-  struct iterate_kit_stream streams[2];
+  /* The device's relay context, opened once per connection. */
+  struct iterate_kit_stream device_stream;
   struct iterate_kit_stream_subscription subscriptions[4];
   struct iterate_kit_stream terminal_stream;
   /* Local answer epoch for the face timeline. */
@@ -407,13 +409,25 @@ EXT_RAM_BSS_ATTR static struct {
   atomic_uint capture_activation_overflows;
   char activation[33];
   bool activation_live;
-  struct voice_setup_ticket {
+  /*
+   * The device's two contexts, provisioned once per connection
+   * (`itx.voice.ensureVoiceDevice`), never on a press: `generation` is the
+   * connection it was asked on, `ready` that it answered with this device's path.
+   */
+  struct {
+    uint32_t generation;
     bool pending;
     bool ready;
-    uint32_t generation;
-    char activation[33];
-    char stream_path[sizeof(stream_path)];
-  } setup[2];
+    /* A refused provisioning is asked again on the remount schedule, never every pass. */
+    struct iterate_kit_retry_gate retry;
+    bool retry_ready;
+  } device;
+  /* The current activation's `call-started` has gone out. */
+  bool call_started_sent;
+  /* The latest call on this device's clock: press to acceptance and to its
+   * first speaker audio, 0 until it happens. */
+  uint32_t press_to_accepted_ms;
+  uint32_t press_to_first_audio_ms;
   struct {
     char activation[33];
     char stream_path[sizeof(stream_path)];
@@ -538,10 +552,13 @@ static void on_session_ended(void *context) {
   for (size_t index = 0U; index < 4U; ++index) {
     iterate_kit_stream_subscription_session_ended(&runtime.subscriptions[index]);
   }
-  for (size_t index = 0U; index < 2U; ++index) {
-    iterate_kit_stream_session_ended(&runtime.streams[index]);
-    (void)iterate_kit_voice_stream_close(&runtime.voice_streams[index]);
-  }
+  iterate_kit_stream_session_ended(&runtime.device_stream);
+  (void)iterate_kit_voice_stream_close(runtime.voice_stream);
+  runtime.voice_stream_generation = 0U;
+  /* The next session provisions again: idempotent, and the proof the device
+   * still has its contexts. */
+  runtime.device.pending = false;
+  runtime.device.ready = false;
   iterate_kit_stream_session_ended(&runtime.terminal_stream);
   for (size_t index = 0U; index < TERMINAL_PENDING_CAPACITY; ++index) {
     runtime.pending_terminals[index].stream = NULL;
@@ -623,6 +640,10 @@ static void on_speaker_pcm(
   if (pcm == NULL || (pcm_length & 1U) != 0U) {
     ++runtime.speaker_bad_frames;
     return;
+  }
+  if (runtime.activation_live && runtime.press_to_first_audio_ms == 0U && pcm_length > 0U) {
+    runtime.press_to_first_audio_ms =
+        (uint32_t)iterate_kit_voice_elapsed_ms(now_ms(NULL), runtime.activation_started_at_ms);
   }
   while (taken < pcm_length) {
     const size_t want = (size_t)FRAME_BYTES - speaker_partial_length;
@@ -736,6 +757,10 @@ static void on_control(
     atomic_store_explicit(
         &runtime.answer_declared_done, false, memory_order_release);
     ESP_LOGI(tag, "new call accepted: speaker queue emptied for a fresh sender");
+    if (runtime.activation_live && runtime.press_to_accepted_ms == 0U) {
+      runtime.press_to_accepted_ms =
+          (uint32_t)iterate_kit_voice_elapsed_ms(now_ms(NULL), runtime.activation_started_at_ms);
+    }
     runtime.view.call_active = (true);
     runtime.opening_started_at_ms = 0U;
     runtime.opening_outcome = OPENING_ACCEPTED;
@@ -1184,7 +1209,6 @@ static uint32_t activation_random(void) {
 }
 
 static void begin_activation(uint64_t now) {
-  bool prepared = false;
   const uint32_t first = activation_random();
   const uint32_t second = activation_random();
   const uint32_t third = activation_random();
@@ -1195,47 +1219,14 @@ static void begin_activation(uint64_t now) {
       first, second, third, fourth);
   runtime.activation_started_at_ms = now;
   runtime.activation_live = true;
-  runtime.voice_stream_generation = 0U;
-  for (size_t index = 0U; index < sizeof(runtime.setup) / sizeof(runtime.setup[0]); ++index) {
-    struct voice_setup_ticket *const ticket = &runtime.setup[index];
-    bool callbacks_released = true;
-    for (size_t sub = 0U; sub < 4U; ++sub) {
-      if (runtime.subscriptions[sub].owner == &runtime.voice_streams[index] &&
-          !iterate_kit_stream_subscription_reclaimable(&runtime.subscriptions[sub])) {
-        callbacks_released = false;
-      }
-    }
-    if (!ticket->pending && callbacks_released &&
-        iterate_kit_stream_reclaimable(&runtime.streams[index])) {
-      char clock[20];
-      const char *const name = clock_slug(clock, sizeof(clock)) ? clock : "unclocked";
-      int written;
-      ticket->generation = runtime.connection.generation;
-      ticket->ready = false;
-      (void)snprintf(ticket->activation, sizeof(ticket->activation), "%s", runtime.activation);
-      written = snprintf(
-          ticket->stream_path,
-          sizeof(ticket->stream_path),
-          "/agents/voice/%s/%s-%s",
-          client_name,
-          name,
-          runtime.activation);
-      if (written < 0 || (size_t)written >= sizeof(ticket->stream_path)) {
-        ticket->stream_path[0] = '\0';
-      } else {
-        prepared = true;
-        runtime.voice_stream = &runtime.voice_streams[index];
-        (void)snprintf(stream_path, sizeof(stream_path), "%s", ticket->stream_path);
-      }
-      break;
-    }
-  }
+  /* The press itself is one append, `press_if_ready`, as soon as the device's
+   * relay context is bound: capture runs from here either way. */
+  runtime.call_started_sent = false;
+  runtime.press_to_accepted_ms = 0U;
+  runtime.press_to_first_audio_ms = 0U;
   runtime.first_mic_append_at_ms = 0U;
   runtime.opening_started_at_ms = now;
   runtime.opening_outcome = OPENING_WAITING;
-  if (!prepared) {
-    end_local_activation("opening-failed", "voice setup unavailable");
-  }
 }
 
 static bool queue_terminal(const char *reason) {
@@ -1267,13 +1258,10 @@ static bool queue_terminal(const char *reason) {
   return true;
 }
 
+/* Fence the call's callbacks at once; the device's subscription stays for the next call. */
 static void fence_activation(void) {
-  for (size_t index = 0U; index < 2U; ++index) {
-    if (strcmp(runtime.setup[index].activation, runtime.activation) != 0) continue;
-    /* Fence callbacks immediately; cleanup waits for control-outbox room. */
-    runtime.voice_streams[index].state = ITERATE_KIT_VOICE_STREAM_CLOSED;
-  }
-  runtime.voice_stream_generation = 0U;
+  iterate_kit_voice_stream_end_call(runtime.voice_stream);
+  runtime.call_started_sent = false;
 }
 
 /*
@@ -1283,16 +1271,12 @@ static void fence_activation(void) {
 static void close_activation_locally(const char *status) {
   fence_activation();
   runtime.activation[0] = '\0';
-  stream_path[0] = '\0';
   runtime.activation_live = false;
   atomic_store_explicit(&runtime.speaker_peak, 0U, memory_order_relaxed);
   atomic_store_explicit(&runtime.speaker_peak_at_ms, 0U, memory_order_release);
   runtime.view.wants_call = false;
   runtime.view.listening = false;
   runtime.view.call_active = false;
-  runtime.voice_stream->call_active = false;
-  runtime.voice_stream->answer_open = false;
-  runtime.voice_stream->last_presence_at_ms = 0U;
   runtime.opening_started_at_ms = 0U;
   runtime.opening_outcome = OPENING_IDLE;
   atomic_fetch_add_explicit(
@@ -1310,9 +1294,8 @@ static void end_local_activation(const char *reason, const char *status) {
   /* Every local end is immediately audible: discard the old answer before
    * fencing capture or waiting for its terminal to reach the stream. */
   (void)abandon_speaker_audio();
-  /* A terminal is required only after this activation reached the stream. */
-  queued = !runtime.activation_live ||
-      runtime.first_mic_append_at_ms == 0U || queue_terminal(reason);
+  /* A terminal is required only after this activation's press reached the stream. */
+  queued = !runtime.activation_live || !runtime.call_started_sent || queue_terminal(reason);
   /* `pending_terminals` owns the ID now, and a queued terminal fences later
    * microphone appends, so the ended call must stop governing local intent. */
   close_activation_locally(queued ? status : "cancel backlog full");
@@ -1326,16 +1309,34 @@ static void end_authoritative_activation(const char *status) {
   close_activation_locally(status);
 }
 
-static const char *const setup_voice_path[] = {"voice", "setupVoiceAgent"};
-static void bind_voice_if_ready(struct voice_setup_ticket *ticket) {
-  const size_t index = (size_t)(ticket - runtime.setup);
-  struct iterate_kit_stream *const stream = &runtime.streams[index];
+static const char *const ensure_voice_device_path[] = {"voice", "ensureVoiceDevice"};
+
+/* The device's relay context answered and is open on this connection. */
+static bool device_bound(void) {
+  return runtime.device.ready && runtime.device.generation == runtime.connection.generation &&
+      runtime.voice_stream->state == ITERATE_KIT_VOICE_STREAM_READY &&
+      runtime.voice_stream_generation == runtime.connection.generation;
+}
+
+/* Open the device's relay context, then its one subscription. */
+static void bind_device_if_ready(void) {
+  struct iterate_kit_stream *const stream = &runtime.device_stream;
   struct iterate_kit_stream_subscription *subscription = NULL;
-  if (!runtime.activation_live || strcmp(ticket->activation, runtime.activation) != 0 ||
+  if (!runtime.device.ready || runtime.device.generation != runtime.connection.generation ||
       runtime.voice_stream_generation == runtime.connection.generation) return;
+  if (iterate_kit_stream_reclaimable(stream) && stream->state != ITERATE_KIT_STREAM_FAILED) {
+    if (iterate_kit_stream_get(stream, &runtime.connection.session,
+            runtime.connection.mount.project_capability, stream_path) != CAPNWEB_OK) {
+      ESP_LOGE(tag, "voice device stream open failed");
+    }
+    return;
+  }
   if (stream->state == ITERATE_KIT_STREAM_FAILED) {
-    ESP_LOGE(tag, "voice_stream get failed: %d", stream->status);
-    end_local_activation("opening-failed", "voice_stream failed");
+    ESP_LOGE(tag, "voice device stream get failed: %d", stream->status);
+    (void)iterate_kit_stream_close(stream);
+    runtime.device.ready = false;
+    runtime.device.generation = 0U;
+    iterate_kit_retry_gate_defer(&runtime.device.retry, (int64_t)now_ms(NULL) * 1000);
     return;
   }
   if (stream->state != ITERATE_KIT_STREAM_READY) return;
@@ -1345,69 +1346,73 @@ static void bind_voice_if_ready(struct voice_setup_ticket *ticket) {
       break;
     }
   }
-  if (subscription == NULL) {
-    end_local_activation("opening-failed", "voice subscriptions full");
-    return;
-  }
+  if (subscription == NULL) return;
   const struct iterate_kit_voice_stream_options options = {
-    .stream_path = ticket->stream_path,
-    .activation = ticket->activation, .now_ms = now_ms, .clock_context = NULL,
+    .stream_path = stream_path, .now_ms = now_ms, .clock_context = NULL,
     .on_speaker = on_speaker_pcm, .on_control = on_control,
   };
-  if (iterate_kit_voice_stream_bind(runtime.voice_stream, &options, stream, subscription) != CAPNWEB_OK) {
-    end_local_activation("opening-failed", "voice_stream failed");
+  if (iterate_kit_voice_stream_bind(runtime.voice_stream, &options, stream, subscription) !=
+      CAPNWEB_OK) {
+    ESP_LOGE(tag, "voice device subscription failed");
     return;
   }
   runtime.voice_stream_generation = runtime.connection.generation;
-}
-
-static bool current_voice_setup_ready(void) {
-  for (size_t index = 0U; index < sizeof(runtime.setup) / sizeof(runtime.setup[0]); ++index) {
-    if (runtime.setup[index].ready &&
-        runtime.setup[index].generation == runtime.connection.generation &&
-        strcmp(runtime.setup[index].activation, runtime.activation) == 0) return true;
+  /* A rebind under a call already pressed (a remount) follows that call: the
+   * relay has it, so there is nothing to press again. */
+  if (runtime.activation_live && runtime.call_started_sent) {
+    iterate_kit_voice_stream_follow_call(
+        runtime.voice_stream, runtime.activation, runtime.opening_outcome == OPENING_ACCEPTED);
+    /* The failure cleared the view's call; the live call's own edge has already passed. */
+    runtime.view.call_active = runtime.voice_stream->call_active;
   }
-  return false;
 }
 
-static void setup_voice_completed(
-    void *context, const struct capnweb_result *result) {
-  struct voice_setup_ticket *const ticket = context;
+static void device_provisioned(void *context, const struct capnweb_result *result) {
   struct capnweb_value path;
-  char configured_path[sizeof(stream_path)];
+  char provisioned_path[sizeof(stream_path)];
   size_t length = 0U;
-  const bool current = ticket != NULL && ticket->pending &&
-      runtime.activation_live &&
-      ticket->generation == runtime.connection.generation &&
-      strcmp(ticket->activation, runtime.activation) == 0;
-  if (ticket == NULL) return;
-  ticket->pending = false;
-  if (!current || result->kind == CAPNWEB_RESULT_SESSION_ENDED) return;
+  const uint32_t generation = (uint32_t)(uintptr_t)context;
+  runtime.device.pending = false;
+  if (generation != runtime.connection.generation ||
+      result->kind == CAPNWEB_RESULT_SESSION_ENDED) return;
   if (result->kind != CAPNWEB_RESULT_VALUE ||
-      !capnweb_value_object_get(&result->value, "streamPath", &path) ||
+      !capnweb_value_object_get(&result->value, "path", &path) ||
       capnweb_value_copy_string(
-          &path, configured_path, sizeof(configured_path), &length) != CAPNWEB_OK ||
-      strcmp(configured_path, ticket->stream_path) != 0) {
-    end_local_activation("opening-failed", "voice setup failed");
+          &path, provisioned_path, sizeof(provisioned_path), &length) != CAPNWEB_OK ||
+      strcmp(provisioned_path, stream_path) != 0) {
+    ESP_LOGE(tag, "voice device provisioning failed");
+    runtime.device.generation = 0U;
+    if (runtime.device.retry_ready) {
+      iterate_kit_retry_gate_defer(&runtime.device.retry, (int64_t)now_ms(NULL) * 1000);
+    }
+    if (!runtime.activation_live) runtime.view.status = "voice device not provisioned";
     return;
   }
-  ticket->ready = true;
+  /* The stream opens from the loop (`bind_device_if_ready`): a session call
+   * from inside its own reply would interleave with the release it is writing. */
+  runtime.device.ready = true;
+  if (runtime.device.retry_ready) iterate_kit_retry_gate_reset(&runtime.device.retry);
 }
 
-static void start_voice_setup(struct voice_setup_ticket *ticket) {
-  if (!runtime.activation_live || ticket == NULL || ticket->pending || ticket->ready ||
-      ticket->stream_path[0] == '\0') return;
-  struct capnweb_expression path = {
-    CAPNWEB_EXPRESSION_STRING,
-    {.string = {ticket->stream_path, strlen(ticket->stream_path)}},
-  };
-  /* The activation travels with setup so the server can start the call in the
-   * stream's birth batch and dial the provider before the first microphone
-   * frame arrives; the frames carry the same id. */
-  const struct capnweb_expression activation = {
-    CAPNWEB_EXPRESSION_STRING,
-    {.string = {ticket->activation, strlen(ticket->activation)}},
-  };
+/*
+ * PROVISIONING, ONCE PER CONNECTION: the device's agent and its relay context
+ * (`itx.voice.ensureVoiceDevice`), so a press is one append and never a setup.
+ * A board with a screen names the client voice draws on; `screen` comes last
+ * so a board without one sends the first field only.
+ */
+static void start_device_provisioning(void) {
+  if (!runtime.device.retry_ready) {
+    runtime.device.retry_ready =
+        iterate_kit_retry_gate_init(
+            &runtime.device.retry,
+            (uint32_t)ITERATE_KIT_VOICE_REMOUNT_RETRY_MS,
+            (uint32_t)ITERATE_KIT_VOICE_REMOUNT_RETRY_MAX_MS) == ITERATE_KIT_OK;
+  }
+  if (runtime.device.pending || runtime.device.generation == runtime.connection.generation ||
+      !runtime.device.retry_ready ||
+      !iterate_kit_retry_gate_ready(&runtime.device.retry, (int64_t)now_ms(NULL) * 1000)) {
+    return;
+  }
   bool has_screen = false;
   for (size_t m = 0; m < runtime.peer.options.module_count; ++m) {
     const struct iterate_kit_module *module = &runtime.peer.options.modules[m];
@@ -1417,46 +1422,50 @@ static void start_voice_setup(struct voice_setup_ticket *ticket) {
           strcmp(method->path[1], "info") == 0) has_screen = true;
     }
   }
-  /* A board with a screen names the client voice draws on; `screen` comes last
-   * so a board without one sends the first two fields only. */
-  const struct capnweb_expression screen = {
+  const struct capnweb_expression client = {
     CAPNWEB_EXPRESSION_STRING, {.string = {client_name, strlen(client_name)}},
   };
   const struct capnweb_object_field fields[] = {
-    {{"streamPath", sizeof("streamPath") - 1U}, &path},
-    {{"activation", sizeof("activation") - 1U}, &activation},
-    {{"screen", sizeof("screen") - 1U}, &screen},
+    {{"client", sizeof("client") - 1U}, &client},
+    {{"screen", sizeof("screen") - 1U}, &client},
   };
   const struct capnweb_expression args = {
     CAPNWEB_EXPRESSION_OBJECT,
-    {.object = {fields, has_screen ? 3U : 2U}},
+    {.object = {fields, has_screen ? 2U : 1U}},
   };
-  enum capnweb_status status;
-  const size_t index = (size_t)(ticket - runtime.setup);
-  if (iterate_kit_stream_reclaimable(&runtime.streams[index])) {
-    status = iterate_kit_stream_get(
-        &runtime.streams[index], &runtime.connection.session,
-        runtime.connection.mount.project_capability, ticket->stream_path);
-    if (status != CAPNWEB_OK) {
-      end_local_activation("opening-failed", "voice_stream failed");
-      return;
-    }
+  runtime.device.generation = runtime.connection.generation;
+  runtime.device.ready = false;
+  runtime.device.pending = true;
+  if (capnweb_session_call_expressions(
+          &runtime.connection.session,
+          runtime.connection.mount.project_capability,
+          ensure_voice_device_path,
+          sizeof(ensure_voice_device_path) / sizeof(ensure_voice_device_path[0]),
+          &args,
+          1U,
+          device_provisioned,
+          (void *)(uintptr_t)runtime.connection.generation) != CAPNWEB_OK) {
+    ESP_LOGE(tag, "voice device provisioning call failed");
+    runtime.device.pending = false;
+    runtime.device.generation = 0U;
+    iterate_kit_retry_gate_defer(&runtime.device.retry, (int64_t)now_ms(NULL) * 1000);
   }
-  ticket->generation = runtime.connection.generation;
-  ticket->pending = true;
-  status = capnweb_session_call_expressions(
-      &runtime.connection.session,
-      runtime.connection.mount.project_capability,
-      setup_voice_path,
-      sizeof(setup_voice_path) / sizeof(setup_voice_path[0]),
-      &args,
-      1U,
-      setup_voice_completed,
-      ticket);
-  if (status != CAPNWEB_OK) {
-    ticket->pending = false;
-    end_local_activation("opening-failed", "voice setup failed");
+}
+
+/*
+ * THE PRESS, once the device is bound: one append of `call-started`, and the
+ * frames captured since the press follow it at once. An earlier call's
+ * terminal goes first, so the relay hears A end before B starts.
+ */
+static void press_if_ready(void) {
+  if (!runtime.activation_live || runtime.call_started_sent || !device_bound() ||
+      runtime.pending_terminal_count > 0U) return;
+  if (iterate_kit_voice_stream_start_call(runtime.voice_stream, runtime.activation) !=
+      CAPNWEB_OK) {
+    end_local_activation("opening-failed", "press failed");
+    return;
   }
+  runtime.call_started_sent = true;
 }
 
 static void flush_pending_terminal(size_t outbox_free) {
@@ -1482,7 +1491,8 @@ static void flush_pending_terminal(size_t outbox_free) {
   if (iterate_kit_voice_stream_end_activation(
           stream, runtime.pending_terminals[slot].activation,
           runtime.pending_terminals[slot].reason) != CAPNWEB_OK) return;
-  (void)iterate_kit_stream_close(stream);
+  /* The device's own relay context stays open for the next call. */
+  if (stream != &runtime.device_stream) (void)iterate_kit_stream_close(stream);
   runtime.pending_terminals[slot].stream = NULL;
   runtime.pending_terminal_head =
       (runtime.pending_terminal_head + 1U) % TERMINAL_PENDING_CAPACITY;
@@ -1904,6 +1914,10 @@ static size_t health_json(char *out, size_t capacity) {
   const struct field fields[] = {
     {"connectionState", (uint32_t)runtime.connection.state},
     {"openingTimeouts", runtime.opening_timeouts},
+    /* The latest call, on this device's clock: 0 until it happens. */
+    {"pressToAcceptedMs", runtime.press_to_accepted_ms},
+    {"pressToFirstAudioMs", runtime.press_to_first_audio_ms},
+    {"deviceReady", device_bound() ? 1U : 0U},
     {"openingAgeMs",
      runtime.opening_started_at_ms == 0U
          ? 0U
@@ -2082,8 +2096,8 @@ static size_t health_json(char *out, size_t capacity) {
       out,
       capacity,
       "{\"transport\":\"%s\",\"voiceStream\":\"%s\",\"voiceStreamFailure\":\"%s\","
-      /* Current stream path. */
-      "\"conversation\":\"%s\","
+      /* The device's relay context, and the call in progress on it. */
+      "\"conversation\":\"%s\",\"activation\":\"%s\","
       "\"opening\":\"%s\","
       "\"clock\":\"%s\","
       /* WHY IT LAST RESTARTED. Uptime says one happened; only this
@@ -2100,6 +2114,7 @@ static size_t health_json(char *out, size_t capacity) {
       iterate_kit_voice_stream_state_name(runtime.voice_stream->state),
       iterate_kit_voice_stream_failure_name(runtime.voice_stream->failure),
       stream_path,
+      runtime.activation_live ? runtime.activation : "",
       runtime.opening_outcome == OPENING_WAITING ? "waiting"
       : runtime.opening_outcome == OPENING_ACCEPTED ? "accepted"
       : runtime.opening_outcome == OPENING_TIMED_OUT ? "timed-out" : "idle",
@@ -2478,7 +2493,7 @@ bool iterate_kit_voice_loop_init(
     return false;
   }
   /* PSRAM BSS is zeroed at boot; pointer initializers belong here. */
-  runtime.voice_stream = &runtime.voice_streams[0];
+  runtime.voice_stream = &runtime.voice_stream_storage;
   atomic_store_explicit(
       &runtime.speaker_answer_done_generation, UINT32_MAX, memory_order_release);
   runtime.board = ops;
@@ -2504,6 +2519,11 @@ bool iterate_kit_voice_loop_init(
         (character >= 'A' && character <= 'Z') ||
         (character >= '0' && character <= '9') || character == '_';
     if (!identifier_safe) capability_match[index] = '_';
+  }
+  {
+    const int stream_path_length =
+        snprintf(stream_path, sizeof(stream_path), "/voice/%s", client_name);
+    if (stream_path_length < 0 || (size_t)stream_path_length >= sizeof(stream_path)) return false;
   }
   iterate_kit_voice_playout_init(&runtime.playout);
   /* Drain the control inbox at the WebSocket task's priority so producer and
@@ -2687,10 +2707,10 @@ void iterate_kit_voice_loop_step(void) {
     runtime.intent.end_call |= runtime.conversation_control.end_call;
     runtime.conversation_control = (struct iterate_kit_conversation_control){0};
     /*
-     * Publish the mounted project connection at idle. A direct child stream is
-     * deliberately per-call, so requiring one here would leave an idle board
-     * permanently connecting. Once a call is live, readiness also requires its
-     * current child stream.
+     * Publish the mounted project connection at idle. The device's relay
+     * context opens after provisioning, so requiring it here would leave a
+     * board whose project has no voice permanently connecting. Once a call is
+     * live, readiness also requires that stream.
      */
     {
       static bool published_link_ready = true;
@@ -3069,32 +3089,11 @@ void iterate_kit_voice_loop_step(void) {
       struct iterate_kit_spsc_ring_metrics outbox_metrics;
       iterate_kit_spsc_ring_metrics(&runtime.control_outbox, &outbox_metrics);
       flush_pending_terminal(CONTROL_OUTBOX_SLOTS - outbox_metrics.current_slots);
-      for (size_t index = 0U; index < 2U; ++index) {
-        bool terminal_owns_stream = false;
-        if (runtime.activation_live &&
-            strcmp(runtime.setup[index].activation, runtime.activation) == 0) continue;
-        iterate_kit_spsc_ring_metrics(&runtime.control_outbox, &outbox_metrics);
-        if (CONTROL_OUTBOX_SLOTS - outbox_metrics.current_slots < 8U) break;
-        (void)iterate_kit_voice_stream_close(&runtime.voice_streams[index]);
-        for (size_t terminal = 0U; terminal < TERMINAL_PENDING_CAPACITY; ++terminal) {
-          if (runtime.pending_terminals[terminal].stream == &runtime.streams[index]) {
-            terminal_owns_stream = true;
-          }
-        }
-        if (!terminal_owns_stream) (void)iterate_kit_stream_close(&runtime.streams[index]);
-      }
-      if (runtime.activation_live) {
-        iterate_kit_spsc_ring_metrics(&runtime.control_outbox, &outbox_metrics);
-        if (CONTROL_OUTBOX_SLOTS - outbox_metrics.current_slots >= 6U) {
-          for (size_t index = 0U; index < 2U; ++index) {
-            struct voice_setup_ticket *ticket = &runtime.setup[index];
-            if (strcmp(ticket->activation, runtime.activation) == 0) {
-              start_voice_setup(ticket);
-              bind_voice_if_ready(ticket);
-              break;
-            }
-          }
-        }
+      iterate_kit_spsc_ring_metrics(&runtime.control_outbox, &outbox_metrics);
+      if (CONTROL_OUTBOX_SLOTS - outbox_metrics.current_slots >= 6U) {
+        start_device_provisioning();
+        bind_device_if_ready();
+        press_if_ready();
       }
     }
 
@@ -3301,8 +3300,8 @@ void iterate_kit_voice_loop_step(void) {
          * cap is MIC_FRAMES_PER_APPEND frames per event) sends at once.
          */
         /*
-         * Frames flow as soon as the stream is up. The first opens the call;
-         * the facet holds later frames while it dials.
+         * Frames flow as soon as the press is out, never waiting for an
+         * answer; the relay holds them while it dials.
          */
         size_t take = iterate_kit_microphone_flush_frames(
             discarding ? 0U : queued,
@@ -3310,7 +3309,7 @@ void iterate_kit_voice_loop_step(void) {
             runtime.mic_flushed_at_ms, now);
         if (take != 0U &&
             runtime.voice_stream->state == ITERATE_KIT_VOICE_STREAM_READY &&
-            current_voice_setup_ready() &&
+            runtime.call_started_sent &&
             outbox_free >= (size_t)MIC_OUTBOX_RESERVE) {
           /*
            * The stamp only advances on a flush that was actually sent, so a

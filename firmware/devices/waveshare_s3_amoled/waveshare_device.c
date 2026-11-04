@@ -492,12 +492,9 @@ static const struct iterate_kit_board_ops ops = {
 static const struct iterate_kit_board board = {
   .facts = {
   /*
-   * Under /agents/voice/ because the conversation's stream IS its agent: the
-   * voice half and the thinking half are one identity at one path. A default
-   * outside /agents/ gave the device a conversation with no agent behind it.
-   * And one per BOARD: while every device defaulted to "/agents/voice/device",
-   * three boards on one stream produced two call-started for a single press
-   * and an answer that never reached anybody.
+   * One name per BOARD: it names the board's two contexts, `/voice/<name>`
+   * and `/agents/voice/<name>`, so boards that shared a name would share one
+   * relay and press over each other's calls.
    */
   .device_name = "waveshare",
   .speaker = {
