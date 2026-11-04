@@ -1362,6 +1362,8 @@ static void bind_device_if_ready(void) {
   if (runtime.activation_live && runtime.call_started_sent) {
     iterate_kit_voice_stream_follow_call(
         runtime.voice_stream, runtime.activation, runtime.opening_outcome == OPENING_ACCEPTED);
+    /* The failure cleared the view's call; the live call's own edge has already passed. */
+    runtime.view.call_active = runtime.voice_stream->call_active;
   }
 }
 

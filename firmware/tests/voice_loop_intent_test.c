@@ -1073,7 +1073,10 @@ static void a_remount_mid_call_follows_the_call_without_a_second_press(void) {
   pump();
   run_ms(200U);
   pump();
+  step();
   assert(board.last_view.wants_call);
+  /* The board shows the call live again, as the stream knows it is. */
+  assert(board.last_view.call_active);
   assert(sent_after_count(before, PRESS) == 1U);
   /* The relay ends the call; the remounted subscription delivers it. */
   deliver_ended_latest();
