@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
-    "@iterate-com/voice": "https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32",
+    "@iterate-com/voice": "https://pkg.pr.new/iterate/private/@iterate-com/voice@affae8ee113c01b5d9f144b42839647fe4bcd8d5",
     "@tanstack/react-query": "^5.103.2",
     "@tanstack/react-router": "1.170.39",
     "@tanstack/react-start": "1.168.58",

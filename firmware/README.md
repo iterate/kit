@@ -75,8 +75,9 @@ clock master/MCLK, GPIO polarity, amplifier polarity, gain, DMA sizes, and AEC
 reference. Give a new board a stable `facts.device_name`; firmware derives the
 itx expression it answers, `itx.clients.<device_name>` (every character outside
 `[A-Za-z0-9_]` replaced by `_`, because the far end spells that name in
-JavaScript), and its conversation namespace `/agents/voice/<client>`, where
-`<client>` is that `itx.clients` name, from it.
+JavaScript), and its two voice contexts, `/voice/<client>` (the relay) and
+`/agents/voice/<client>` (its agent), where `<client>` is that `itx.clients`
+name, from it.
 
 USB-C boards using a FUSB302B can reuse `fusb302_esp_start()` with their I2C
 device and voltage/current/power limits. The driver is a fixed-supply PD 2.0
@@ -246,16 +247,26 @@ only the handle you own. Keep its storage until `reclaimable()` says both the
 pending RPC and remote callback references have finished. The generic layer
 does not choose a stream path or manage the socket. Available concurrency is
 bounded by the device's configured Cap'n Web tables; exhaustion is an explicit
-error. The voice loop reserves two call slots so a new call can open while the
-previous call finishes releasing its resources.
+error.
 
-A button press or wake word starts capture immediately and chooses a fresh
-`/agents/voice/<client>/<UTC timestamp>-<activation>` path, the convention every
-voice caller follows. Setup puts the ordinary Agent and voice processor on that
-stream; a board with a screen also sends its client name as `screen`, which
-gives the call its screen guide. Opening PCM stays in
-the device's bounded FIFO until setup and the direct stream subscription are
-ready. Microphone and speaker events travel directly through that stream.
+When the connection is up, the board provisions itself once:
+`itx.voice.ensureVoiceDevice({ client, screen? })` makes (or finds) its two
+contexts, the relay at `/voice/<client>` and its agent at
+`/agents/voice/<client>`; a board with a screen also sends its client name as
+`screen`, which gives its agent the screen guide. The board then opens the
+relay's context and ONE subscription to it, for every call of the connection,
+filtered to the call in progress. A refused provisioning is asked again on the
+remount backoff.
+
+A button press or wake word starts capture immediately and mints an
+activation. The press is ONE append to the relay's context,
+`voice-agent/call-started { activation }` (keyed by the activation); the
+microphone's frames follow it at once, never waiting for an answer, and the
+relay holds them while it dials. A press made before provisioning answered
+waits for it, inside the 5 s opening deadline. An earlier call's `call-ended`
+goes before the next press. Health reports `conversation` (the relay's path),
+`activation`, and the latest call's `pressToAcceptedMs` and
+`pressToFirstAudioMs` on the board's own clock.
 
 ## Over-the-air updates
 

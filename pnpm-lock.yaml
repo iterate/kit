@@ -17,8 +17,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@iterate-com/voice':
-        specifier: https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32
-        version: https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32(iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))
+        specifier: https://pkg.pr.new/iterate/private/@iterate-com/voice@affae8ee113c01b5d9f144b42839647fe4bcd8d5
+        version: https://pkg.pr.new/iterate/private/@iterate-com/voice@affae8ee113c01b5d9f144b42839647fe4bcd8d5(iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))
       '@tanstack/react-query':
         specifier: ^5.103.2
         version: 5.104.0(react@19.3.0)
@@ -853,8 +853,8 @@ packages:
   '@iterate-com/capnweb@0.12.3':
     resolution: {integrity: sha512-puzZnzPziu7bh3ysr4/rRWeH4oMQD5iacoMdDReJoUxxbkSiFMcTIpbLvUXeWwrG4kupVMv7n1bsokREyNLlxA==}
 
-  '@iterate-com/voice@https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32':
-    resolution: {tarball: https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32}
+  '@iterate-com/voice@https://pkg.pr.new/iterate/private/@iterate-com/voice@affae8ee113c01b5d9f144b42839647fe4bcd8d5':
+    resolution: {tarball: https://pkg.pr.new/iterate/private/@iterate-com/voice@affae8ee113c01b5d9f144b42839647fe4bcd8d5}
     version: 0.1.0
     peerDependencies:
       iterate: '*'
@@ -4110,7 +4110,7 @@ snapshots:
 
   '@iterate-com/capnweb@0.12.3': {}
 
-  '@iterate-com/voice@https://pkg.pr.new/iterate/private/@iterate-com/voice@c0474c3612b576d3c933bb01adca0bd9caa65c32(iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))':
+  '@iterate-com/voice@https://pkg.pr.new/iterate/private/@iterate-com/voice@affae8ee113c01b5d9f144b42839647fe4bcd8d5(iterate@https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0))(zod@4.6.5(patch_hash=5a57d5a4f788c6fe9e15d60e59511c1f901b7fc1d638126eb2b02cafc9e79a86))':
     dependencies:
       iterate: https://pkg.pr.new/iterate/private/iterate@c0474c3612b576d3c933bb01adca0bd9caa65c32(react@19.3.0)
       pako: 3.0.2

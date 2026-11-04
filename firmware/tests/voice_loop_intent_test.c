@@ -291,14 +291,10 @@ static void quiescent(void) {
  * chain's length is the device's business, not this test's.
  */
 static size_t answered;
-static bool defer_voice_setup;
+/* Provisioning the device (`ensureVoiceDevice`) is answered, or refused once. */
+static bool refuse_device_provisioning;
 static bool defer_stream_get;
 static long deferred_stream_get_id;
-static struct {
-  long id;
-  char stream_path[160];
-} deferred_voice_setups[2];
-static size_t deferred_voice_setup_count;
 struct open_connection {
   long capability;
   long callback;
@@ -376,18 +372,6 @@ static void remember_open_connection(long capability) {
   --pending_open_connection_count;
 }
 
-static bool copy_setup_stream_path(const char *message, char *out, size_t capacity) {
-  const char *field = strstr(message, "\"streamPath\":\"");
-  size_t length;
-  if (field == NULL) return false;
-  field += strlen("\"streamPath\":\"");
-  length = strcspn(field, "\"");
-  if (length == 0U || length >= capacity) return false;
-  memcpy(out, field, length);
-  out[length] = '\0';
-  return true;
-}
-
 static bool copy_stream_get_path(const char *message, char *out, size_t capacity) {
   const char *call = strstr(message, "[\"cd\"]");
   const char *path;
@@ -419,24 +403,9 @@ static void remember_pending_stream_capability(long capability) {
   --pending_stream_path_count;
 }
 
-static void resolve_deferred_voice_setup(size_t index) {
-  char reply[256];
-  struct iterate_kit_itx_connection *connection =
-      iterate_kit_fake_platform_connection();
-  assert(index < deferred_voice_setup_count);
-  assert(connection != NULL);
-  (void)snprintf(
-      reply,
-      sizeof(reply),
-      "[\"resolve\",%ld,{\"streamPath\":\"%s\",\"warmMs\":0}]",
-      deferred_voice_setups[index].id,
-      deferred_voice_setups[index].stream_path);
-  deliver(connection, reply);
-}
-
 static void pump(void) {
   int round;
-  char setup_stream_path[160] = "";
+  bool device_reply_pending = false;
   char stream_get_path[160] = "";
   for (round = 0; round < 40; ++round) {
     struct iterate_kit_itx_connection *connection =
@@ -472,14 +441,12 @@ static void pump(void) {
           }
         }
       }
-      if (strstr(message, "setupVoiceAgent") != NULL) {
-        assert(copy_setup_stream_path(
-            message, setup_stream_path, sizeof(setup_stream_path)));
-        /* `/agents/voice/<client>/<UTC>-<activation>`, and the screen named
-         * by the same client: "host-test" spelled as `itx.clients` spells it. */
-        assert(strncmp(setup_stream_path, "/agents/voice/host_test/",
-                       sizeof("/agents/voice/host_test/") - 1U) == 0);
+      if (strstr(message, "ensureVoiceDevice") != NULL) {
+        /* The device names itself, and the screen by the same client:
+         * "host-test" spelled as `itx.clients` spells it. */
+        assert(strstr(message, "\"client\":\"host_test\"") != NULL);
         assert(strstr(message, "\"screen\":\"host_test\"") != NULL);
+        device_reply_pending = true;
       }
       if (strstr(message, "[\"cd\"]") != NULL) {
         assert(copy_stream_get_path(
@@ -489,26 +456,18 @@ static void pump(void) {
       {
         char reply[256];
         const long id = strtol(pull + strlen("[\"pull\","), NULL, 10);
-        if (setup_stream_path[0] != '\0') {
-          if (defer_voice_setup) {
-            assert(deferred_voice_setup_count <
-                   sizeof(deferred_voice_setups) / sizeof(deferred_voice_setups[0]));
-            deferred_voice_setups[deferred_voice_setup_count].id = id;
-            (void)snprintf(
-                deferred_voice_setups[deferred_voice_setup_count].stream_path,
-                sizeof(deferred_voice_setups[deferred_voice_setup_count].stream_path),
-                "%s", setup_stream_path);
-            ++deferred_voice_setup_count;
-            setup_stream_path[0] = '\0';
-            continue;
+        if (device_reply_pending) {
+          if (refuse_device_provisioning) {
+            (void)snprintf(reply, sizeof(reply),
+                "[\"reject\",%ld,[\"error\",\"Error\",\"voice is not installed\"]]", id);
+            refuse_device_provisioning = false;
+          } else {
+            (void)snprintf(reply, sizeof(reply),
+                "[\"resolve\",%ld,{\"path\":\"/voice/host_test\","
+                "\"agentPath\":\"/agents/voice/host_test\"}]",
+                id);
           }
-          (void)snprintf(
-              reply,
-              sizeof(reply),
-              "[\"resolve\",%ld,{\"streamPath\":\"%s\",\"warmMs\":0}]",
-              id,
-              setup_stream_path);
-          setup_stream_path[0] = '\0';
+          device_reply_pending = false;
         } else {
           if (stream_get_path[0] != '\0' && defer_stream_get) {
             assert(deferred_stream_get_id == 0L);
@@ -576,19 +535,6 @@ static size_t sent_after_count(size_t from, const char *needle) {
   size_t count = 0U;
   for (size_t index = from; index < iterate_kit_fake_platform_sent_count(); ++index) {
     if (strstr(iterate_kit_fake_platform_sent(index), needle) != NULL) ++count;
-  }
-  return count;
-}
-
-static size_t collect_setup_paths(
-    size_t from, char paths[][160], size_t capacity) {
-  size_t count = 0U;
-  for (size_t index = from; index < iterate_kit_fake_platform_sent_count(); ++index) {
-    const char *message = iterate_kit_fake_platform_sent(index);
-    if (message == NULL || strstr(message, "setupVoiceAgent") == NULL) continue;
-    assert(count < capacity);
-    assert(copy_setup_stream_path(message, paths[count], sizeof(paths[count])));
-    ++count;
   }
   return count;
 }
@@ -699,7 +645,7 @@ static void deliver_speaker_frame(bool last) {
       "[\"push\",[\"pipeline\",%ld,[],[[["
       "{\"type\":\"events.iterate.com/voice-agent/speaker-frame\","
       "\"offset\":%ld,"
-      "\"payload\":{\"activation\":\"%s\",\"conversationId\":\"convdial\",\"deviceSpeakerFrameSeq\":%ld,%s"
+      "\"payload\":{\"activation\":\"%s\",\"deviceSpeakerFrameSeq\":%ld,%s"
       "\"pcm\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
       "]],{\"after\":%ld,\"through\":%ld}]]]",
       export_id, offset, current_activation(), offset,
@@ -728,7 +674,7 @@ static void deliver_accepted_latest(void) {
       "[\"push\",[\"pipeline\",%ld,[],[[["
       "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\","
       "\"offset\":%ld,"
-      "\"payload\":{\"activation\":\"%s\",\"conversationId\":\"convdial\",\"handshakeTookMs\":2000}}"
+      "\"payload\":{\"activation\":\"%s\",\"handshakeTookMs\":2000}}"
       "]],{\"after\":%ld,\"through\":%ld}]]]",
       export_id, offset, current_activation(), offset - 1, offset);
   deliver(connection, message);
@@ -916,42 +862,46 @@ static void failed_microphone_append_ends_the_activation(void) {
   assert(strcmp(board.last_view.status, "microphone append failed") == 0);
 }
 
-/* A setup reply belongs to the press that made it, even if a later press is
- * already opening when that old reply arrives. */
-static void delayed_a_setup_cannot_cancel_or_mount_b(void) {
-  char paths[2][160];
-  size_t after_b_setup;
+/*
+ * THE PRESS IS ONE APPEND on the device the connection provisioned: no setup,
+ * no new context and no new subscription. Two calls in a row ride the same
+ * relay context, each under its own activation, and B's press follows A's end.
+ */
+static void the_press_is_one_append_on_the_provisioned_device(void) {
+  char activation_a[65];
+  size_t press_a;
+  size_t press_b;
   quiescent();
   const size_t before = iterate_kit_fake_platform_sent_count();
-  defer_voice_setup = true;
   remote_call("conversation", "start");
   step();
-  pump();
-  assert(deferred_voice_setup_count == 1U);
+  speak_frames(1U);
+  run_ms(50U);
+  (void)snprintf(activation_a, sizeof(activation_a), "%s", current_activation());
+  press_a = first_sent_after_containing(before, "voice-agent/call-started");
+  assert(press_a < iterate_kit_fake_platform_sent_count());
+  {
+    char keyed[128];
+    (void)snprintf(keyed, sizeof(keyed), "\"idempotencyKey\":\"voice-agent/call:%s\"",
+        activation_a);
+    assert(sent_after_contains(before, keyed));
+  }
+  /* The frames go at once, before anything answered the press. */
+  assert(sent_microphone_to_stream(before, "/voice/host_test"));
+  assert(!sent_after_contains(before, "ensureVoiceDevice"));
+  assert(!sent_after_contains(before, "[\"cd\"]"));
+  assert(!sent_after_contains(before, "[\"subscribe\"]"));
 
   remote_call("conversation", "end");
   step();
   remote_call("conversation", "start");
   step();
-  defer_voice_setup = false;
-  pump();
-  assert(board.last_view.wants_call);
-  assert(collect_setup_paths(before, paths, 2U) == 2U);
-  assert(strcmp(paths[0], paths[1]) != 0);
-
-  after_b_setup = iterate_kit_fake_platform_sent_count();
-  resolve_deferred_voice_setup(0U);
-  step();
-  pump();
   speak_frames(1U);
-  run_ms(100U);
-
-  assert(board.last_view.wants_call);
-  assert(strcmp(board.last_view.status, "voice setup failed") != 0);
-  assert(sent_after_contains(before, "\"pcm\":"));
-  assert(sent_microphone_to_stream(after_b_setup, paths[1]));
-  assert(!sent_after_contains(after_b_setup, "[\"subscribe\"]"));
-  deferred_voice_setup_count = 0U;
+  run_ms(50U);
+  assert(strcmp(current_activation(), activation_a) != 0);
+  press_b = first_sent_after_containing(press_a + 1U, "voice-agent/call-started");
+  assert(first_sent_after_containing(before, "voice-agent/call-ended") < press_b);
+  assert(!sent_after_contains(before, "[\"subscribe\"]"));
   quiescent();
 }
 
@@ -1046,17 +996,15 @@ static void losing_the_session_ends_the_call_and_the_next_press_opens_a_new_one(
   quiescent();
 }
 
-/* B may already have captured while A's terminal waits for outbox space, but
- * that PCM waits for B's own newly opened child rather than using A's stub. */
-static void b_pcm_waits_for_its_own_child_after_a_terminal(void) {
-  char paths[2][160];
-  size_t before;
+/* B may already have captured while A's terminal waits for outbox space; B's
+ * press and its PCM wait for that terminal, then go to the same relay context. */
+static void b_waits_for_a_terminal_before_its_press(void) {
   size_t after_b_capture;
-  size_t b_open;
+  size_t terminal;
+  size_t b_press;
   size_t b_microphone;
 
   quiescent();
-  before = iterate_kit_fake_platform_sent_count();
   remote_call("conversation", "start");
   step();
   pump();
@@ -1074,61 +1022,64 @@ static void b_pcm_waits_for_its_own_child_after_a_terminal(void) {
 
   iterate_kit_fake_platform_drain_control_outbox();
   step();
-  pump();
   run_ms(100U);
-  b_open = first_sent_after_containing(after_b_capture, "[\"subscribe\"]");
+  terminal = first_sent_after_containing(after_b_capture, "voice-agent/call-ended");
+  b_press = first_sent_after_containing(after_b_capture, "voice-agent/call-started");
   b_microphone = first_sent_after_containing(after_b_capture, "\"pcm\":");
-  assert(sent_after_contains(
-      after_b_capture, "\"type\":\"events.iterate.com/voice-agent/call-ended\""));
-  assert(b_open < iterate_kit_fake_platform_sent_count());
+  assert(terminal < b_press);
+  assert(b_press < b_microphone);
   assert(b_microphone < iterate_kit_fake_platform_sent_count());
-  assert(b_open < b_microphone);
-  assert(collect_setup_paths(before, paths, 2U) == 2U);
-  assert(strcmp(paths[0], paths[1]) != 0);
-  assert(sent_microphone_to_stream(after_b_capture, paths[1]));
+  assert(sent_microphone_to_stream(after_b_capture, "/voice/host_test"));
+  assert(!sent_after_contains(after_b_capture, "[\"subscribe\"]"));
   quiescent();
 }
 
-/* Reclaimable FAILED handles must be opened again for the next child path. */
-static void rejected_stream_can_be_reused_by_an_immediate_new_activation(void) {
-  char reply[160];
-  char activation_a[65];
+/* A refused provisioning is asked again on its backoff, never every pass, and a
+ * press made meanwhile waits for it instead of setting anything up itself. */
+static void a_refused_provisioning_is_asked_again_and_the_press_waits(void) {
+  size_t after_reconnect;
   quiescent();
-  const size_t before = iterate_kit_fake_platform_sent_count();
-  defer_stream_get = true;
-  remote_call("conversation", "start");
-  step();
+  iterate_kit_itx_connection_lost(iterate_kit_fake_platform_connection());
+  iterate_kit_fake_platform_drain_control_outbox();
+  next_inbound_call_id = 1;
+  pending_open_connection_count = 0U;
+  pending_stream_path_count = 0U;
+  memset(open_connections, 0, sizeof(open_connections));
+  memset(stream_capabilities, 0, sizeof(stream_capabilities));
+  refuse_device_provisioning = true;
+  iterate_kit_fake_platform_connect();
+  after_reconnect = iterate_kit_fake_platform_sent_count();
   pump();
-  assert(deferred_stream_get_id != 0L);
-  (void)snprintf(activation_a, sizeof(activation_a), "%s", current_activation());
-  (void)snprintf(reply, sizeof(reply),
-      "[\"reject\",%ld,[\"error\",\"Error\",\"stream denied\"]]",
-      deferred_stream_get_id);
-  deliver(iterate_kit_fake_platform_connection(), reply);
-  deferred_stream_get_id = 0L;
-  defer_stream_get = false;
+  run_ms(500U);
+  pump();
+  assert(sent_after_count(after_reconnect, "ensureVoiceDevice") == 1U);
 
-  /* Reuse FAILED storage before idle housekeeping has closed it. */
-  remote_call("conversation", "end");
   remote_call("conversation", "start");
   step();
-  pump();
   speak_frames(1U);
-  run_ms(50U);
-  assert(board.last_view.wants_call);
-  assert(strcmp(activation_a, current_activation()) != 0);
-  assert(sent_after_count(before, "[\"cd\"]") == 2U);
-  assert(sent_after_contains(before, "\"pcm\":"));
+  run_ms(100U);
+  assert(!sent_after_contains(after_reconnect, "voice-agent/call-started"));
+  assert(!sent_after_contains(after_reconnect, "\"pcm\":"));
+
+  /* The backoff runs out, provisioning answers, and the waiting press goes. */
+  run_ms(ITERATE_KIT_VOICE_REMOUNT_RETRY_MS);
+  pump();
+  run_ms(100U);
+  pump();
+  run_ms(100U);
+  assert(sent_after_count(after_reconnect, "ensureVoiceDevice") == 2U);
+  assert(sent_after_contains(after_reconnect, "voice-agent/call-started"));
+  assert(sent_microphone_to_stream(after_reconnect, "/voice/host_test"));
   quiescent();
 }
 
 /*
  * Wake detection reaches the app after audio has already crossed the codec.
- * The first, middle and following frames must therefore survive the mount
- * and reach the stream in chronological order, even though no call was ready
- * while they were captured.
+ * The first, middle and following frames must therefore reach the stream in
+ * chronological order, and they go from the press: nothing answers before
+ * they are sent, because nothing is set up on a press.
  */
-static void pre_mount_speech_is_preserved_and_sent_immediately(void) {
+static void speech_from_the_press_is_sent_at_once_in_order(void) {
   uint8_t pcm[6U * ITERATE_KIT_VOICE_FRAME_BYTES];
   quiescent();
   const size_t before = iterate_kit_fake_platform_sent_count();
@@ -1139,11 +1090,8 @@ static void pre_mount_speech_is_preserved_and_sent_immediately(void) {
   speak_frames(1U); /* prefix */
   speak_frames(4U); /* middle */
   speak_frames(1U); /* following frame */
-  run_ms(3000U); /* Backend setup can take seconds; opening words remain queued. */
+  run_ms(100U);
 
-  assert(!sent_after_contains(before, "mic-frame"));
-  pump();
-  run_ms(50U);
   assert(sent_after_contains(before, "mic-frame"));
   assert(collect_sent_microphone(before, pcm, sizeof(pcm)) == sizeof(pcm));
   assert(collected_sample(pcm, 0U) == 1000);
@@ -1228,12 +1176,6 @@ static void server_end_discards_a_tail_before_b(void) {
   after_end = iterate_kit_fake_platform_sent_count();
   remote_call("conversation", "start");
   step();
-  defer_voice_setup = true;
-  pump();
-  assert(deferred_voice_setup_count == 1U);
-  defer_voice_setup = false;
-  resolve_deferred_voice_setup(0U);
-  deferred_voice_setup_count = 0U;
   pump();
   capture_frame_value = 5000;
   speak_frames(1U);
@@ -1323,16 +1265,17 @@ static void activation_during_codec_read_keeps_idle_pre_roll(void) {
   step();
 }
 
-/* An unanswered activation stops once at 20 seconds and says why. */
+/* An unanswered activation stops once at 5 seconds and says why. */
 static void an_unaccepted_activation_times_out_once(void) {
   const size_t before = iterate_kit_fake_platform_sent_count();
   quiescent();
   remote_call("conversation", "start");
   step();
-  pump();
   speak_frames(1U);
-  run_ms(50U);
-  run_ms(20000U);
+  /* pump() moves the clock too, so the bound is checked before any. */
+  run_ms(4800U);
+  assert(board.last_view.wants_call);
+  run_ms(250U);
   /* The terminal survives an unavailable mount and is appended once it recovers. */
   pump();
   step();
@@ -1405,8 +1348,8 @@ int main(void) {
   an_idle_session_probes_the_root_once_a_period();
   answered_probes_are_liveness_without_any_pong();
 
-  pre_mount_speech_is_preserved_and_sent_immediately();
-  rejected_stream_can_be_reused_by_an_immediate_new_activation();
+  speech_from_the_press_is_sent_at_once_in_order();
+  the_press_is_one_append_on_the_provisioned_device();
   same_pass_end_then_start_creates_a_new_activation();
   accepted_call_end_then_start_creates_b_after_a_terminal();
   terminal_waits_for_outbox_headroom();
@@ -1420,13 +1363,16 @@ int main(void) {
   a_stream_silent_mid_answer_is_recycled();
   activation_during_codec_read_keeps_idle_pre_roll();
   an_unaccepted_activation_times_out_once();
-  delayed_a_setup_cannot_cancel_or_mount_b();
-  /* Every activation above used the same authenticated WebSocket session. */
+  /* Every activation above used the same authenticated WebSocket session, and
+   * the device was provisioned once for it, never on a press. */
   assert(sent_after_count(0U, "\"authenticate\"") == 1U);
+  assert(sent_after_count(0U, "ensureVoiceDevice") == 1U);
   assert(iterate_kit_fake_platform_connection()->generation == 1U);
   queued_terminal_survives_session_loss_before_b();
   losing_the_session_ends_the_call_and_the_next_press_opens_a_new_one();
-  b_pcm_waits_for_its_own_child_after_a_terminal();
+  b_waits_for_a_terminal_before_its_press();
+  a_refused_provisioning_is_asked_again_and_the_press_waits();
+  /* Last: a failed send ends the session under it. */
   failed_microphone_append_ends_the_activation();
   return 0;
 }

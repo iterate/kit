@@ -1,6 +1,7 @@
 /*
  * voice_stream: single-WebSocket device end of the voice_stream protocol —
- * caller-owned cd -> bind -> subscribe, then one-way mic-frame appends
+ * the device's relay context, caller-owned: cd -> bind -> subscribe once, then
+ * per call the press (one call-started append) and one-way mic-frame appends
  * (base64 PCM16, ephemeral).
  */
 #include "iterate/kit/voice_stream.h"
@@ -47,6 +48,7 @@ static void record_control(void *context, enum iterate_kit_voice_stream_control 
 static void accept_call(
     struct fixture *fixture, int callback, int release, int64_t offset);
 static void release_server_callback(struct fixture *fixture, int callback);
+static void resolve_latest_pull(struct fixture *fixture, const char *value);
 
 #include "capnweb_capture.h"
 
@@ -85,10 +87,10 @@ static void receive(struct fixture *fixture, const char *message) {
   assert(status == CAPNWEB_OK);
 }
 
+/* The device bound to its relay context, then pressed under TEST_ACTIVATION. */
 static void start_and_mount(struct fixture *fixture) {
   const struct iterate_kit_voice_stream_options options = {
-    .stream_path = "/voice-agent/dev-test",
-    .activation = TEST_ACTIVATION,
+    .stream_path = "/voice/dev_test",
     .now_ms = fixture_now_ms,
     .clock_context = fixture,
     .on_speaker = record_speaker,
@@ -103,6 +105,8 @@ static void start_and_mount(struct fixture *fixture) {
   receive(fixture, "[\"resolve\",2,[\"export\",-13]]");
   iterate_kit_voice_stream_update(&fixture->voice_stream);
   assert(fixture->voice_stream.state == ITERATE_KIT_VOICE_STREAM_READY);
+  assert(iterate_kit_voice_stream_start_call(&fixture->voice_stream, TEST_ACTIVATION) ==
+         CAPNWEB_OK);
 }
 
 static uint8_t spoken[ITERATE_KIT_VOICE_STREAM_CHUNK_BYTES];
@@ -311,7 +315,7 @@ static void downlink_flow(void) {
         message, sizeof(message),
         "[\"push\",[\"pipeline\",-1,[],[[["
         "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\","
-        "\"offset\":39,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\",\"conversationId\":\"wsdev\"}},"
+        "\"offset\":39,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\"}},"
         "{\"type\":\"events.iterate.com/voice-agent/speaker-frame\",\"offset\":40,"
         "\"payload\":{\"activation\":\"" TEST_ACTIVATION "\",\"pcm\":\"%s\"}},"
         "{\"type\":\"events.iterate.com/voice-agent/speaker-frame\",\"offset\":41,"
@@ -431,7 +435,7 @@ static void downlink_flow(void) {
       &fixture,
       "[\"push\",[\"pipeline\",-1,[],[[["
       "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\",\"offset\":50,"
-      "\"payload\":{\"activation\":\"" TEST_ACTIVATION "\",\"conversationId\":\"wsdev\",\"bridge\":\"worker\"}}"
+      "\"payload\":{\"activation\":\"" TEST_ACTIVATION "\",\"bridge\":\"worker\"}}"
       "]],{\"after\":49,\"through\":50}]]]");
   receive(&fixture, "[\"release\",6,1]");
   assert(fixture.voice_stream.call_active);
@@ -503,7 +507,7 @@ static void speaker_flags_ride_numbered_or_bare_frames(void) {
         message, sizeof(message),
         "[\"push\",[\"pipeline\",-1,[],[[["
         "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\","
-        "\"offset\":99,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\",\"conversationId\":\"wsdev\"}},"
+        "\"offset\":99,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\"}},"
         "{\"type\":\"events.iterate.com/voice-agent/speaker-frame\",\"offset\":100,"
         "\"payload\":{\"activation\":\"" TEST_ACTIVATION "\",\"deviceSpeakerFrameSeq\":0,\"pcm\":\"%s\"}}"
         "]],{\"after\":99,\"through\":100}]]]",
@@ -632,7 +636,8 @@ static void recycle_keeps_call_epoch_and_fences_closed_predecessor(void) {
   push_speaker_frame_to(&fixture, -2, 4, 3, "", frames_b64(1U, 0x43));
   assert(spoken_frames == frames + 1U);
   assert(fixture.voice_stream.batches_on_connection == 1U);
-  receive(&fixture, "[\"resolve\",3,[\"export\",-14]]");
+  /* the replacement's open, whatever call id the press took before it */
+  resolve_latest_pull(&fixture, "[\"export\",-14]");
   iterate_kit_voice_stream_update(&fixture.voice_stream);
   assert(fixture.voice_stream.state == ITERATE_KIT_VOICE_STREAM_READY);
   assert(fixture.voice_stream.previous_subscription == NULL);
@@ -676,7 +681,8 @@ static void repeated_silent_renewals_start_with_no_batches(void) {
   assert(fixture.voice_stream.batches_on_connection == 1U);
   assert(iterate_kit_voice_stream_recycle_subscription(
       &fixture.voice_stream, &fixture.replacement_subscription) == CAPNWEB_OK);
-  receive(&fixture, "[\"resolve\",3,[\"export\",-14]]");
+  /* the replacement's open, whatever call id the press took before it */
+  resolve_latest_pull(&fixture, "[\"export\",-14]");
   iterate_kit_voice_stream_update(&fixture.voice_stream);
   assert(fixture.voice_stream.batches_on_connection == 0U);
   release_server_callback(&fixture, -1);
@@ -733,8 +739,7 @@ static void accept_call(
   const int length = snprintf(message, sizeof(message),
       "[\"push\",[\"pipeline\",%d,[],[[["
       "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\","
-      "\"offset\":%lld,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\","
-      "\"conversationId\":\"test\"}}"
+      "\"offset\":%lld,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\"}}"
       "]],{\"after\":%lld,\"through\":%lld}]]]",
       callback, (long long)offset, (long long)offset - 1, (long long)offset);
   assert(length > 0 && (size_t)length < sizeof(message));
@@ -756,8 +761,7 @@ static void fenced_voice_stream_ignores_late_callback(void) {
   receive(&fixture,
       "[\"push\",[\"pipeline\",-1,[],[[["
       "{\"type\":\"events.iterate.com/voice-agent/conversation-accepted\","
-      "\"offset\":1,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\","
-      "\"conversationId\":\"late\"}},"
+      "\"offset\":1,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\"}},"
       "{\"type\":\"events.iterate.com/voice-agent/speaker-frame\","
       "\"offset\":2,\"payload\":{\"activation\":\"" TEST_ACTIVATION "\","
       "\"pcm\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}"
@@ -772,13 +776,13 @@ static void fenced_voice_stream_ignores_late_callback(void) {
   assert(iterate_kit_stream_subscription_reclaimable(&fixture.subscription));
 }
 
-/* A delivery can race the open result. OPENING is still the current call and
- * must accept it; CLOSED is the only lifecycle fence. */
-static void opening_voice_stream_accepts_current_callback(void) {
+/* The device's subscription outlives its calls: before a press, and after a
+ * call's local end, nothing passes; the pressed call's own events do, whether
+ * they race the open result or not. */
+static void a_bound_device_passes_only_its_pressed_calls_events(void) {
   struct fixture fixture;
   const struct iterate_kit_voice_stream_options options = {
-    .stream_path = "/voice-agent/dev-test",
-    .activation = TEST_ACTIVATION,
+    .stream_path = "/voice/dev_test",
     .now_ms = fixture_now_ms,
     .clock_context = &fixture,
     .on_control = record_control,
@@ -790,10 +794,37 @@ static void opening_voice_stream_accepts_current_callback(void) {
   assert(iterate_kit_voice_stream_bind(&fixture.voice_stream, &options,
       &fixture.stream, &fixture.subscription) == CAPNWEB_OK);
   assert(fixture.voice_stream.state == ITERATE_KIT_VOICE_STREAM_OPENING_CONNECTION);
+  /* No press yet: a press is refused until the subscription is open, and an
+   * acceptance names no call of this device. */
+  assert(iterate_kit_voice_stream_start_call(&fixture.voice_stream, TEST_ACTIVATION) ==
+         CAPNWEB_E_STATE);
+  assert(!iterate_kit_voice_stream_downlink_expected(&fixture.voice_stream));
   accept_call(&fixture, -1, 1, 1);
-  assert(fixture.voice_stream.call_active);
+  assert(!fixture.voice_stream.call_active);
   receive(&fixture, "[\"resolve\",2,[\"export\",-13]]");
   iterate_kit_voice_stream_update(&fixture.voice_stream);
+  assert(fixture.voice_stream.state == ITERATE_KIT_VOICE_STREAM_READY);
+
+  /* THE PRESS: one keyed append naming the activation. */
+  {
+    const size_t before = fixture.captured_count;
+    assert(iterate_kit_voice_stream_start_call(&fixture.voice_stream, TEST_ACTIVATION) ==
+           CAPNWEB_OK);
+    assert(fixture.captured_count == before + 2U);
+    assert(strstr(fixture.captured[before],
+                  "{\"type\":\"events.iterate.com/voice-agent/call-started\","
+                  "\"idempotencyKey\":\"voice-agent/call:" TEST_ACTIVATION "\","
+                  "\"payload\":{\"activation\":\"" TEST_ACTIVATION "\"}}") != NULL);
+  }
+  assert(iterate_kit_voice_stream_downlink_expected(&fixture.voice_stream));
+  accept_call(&fixture, -1, 2, 2);
+  assert(fixture.voice_stream.call_active);
+
+  /* A local end fences the call; the subscription stays for the next one. */
+  iterate_kit_voice_stream_end_call(&fixture.voice_stream);
+  assert(!fixture.voice_stream.call_active);
+  accept_call(&fixture, -1, 3, 3);
+  assert(!fixture.voice_stream.call_active);
   assert(fixture.voice_stream.state == ITERATE_KIT_VOICE_STREAM_READY);
   assert(iterate_kit_voice_stream_close(&fixture.voice_stream) == CAPNWEB_OK);
   release_server_callback(&fixture, latest_callback_id(&fixture));
@@ -842,7 +873,7 @@ static void close_waits_for_server_callback_before_slot_reuse(void) {
   for (int cycle = 0; cycle < 5; ++cycle) {
     assert(iterate_kit_voice_stream_bind(&fixture.voice_stream,
         &(const struct iterate_kit_voice_stream_options){
-          .stream_path = "/voice-agent/dev-test", .activation = TEST_ACTIVATION,
+          .stream_path = "/voice/dev_test",
           .now_ms = fixture_now_ms, .clock_context = &fixture,
         }, &fixture.stream, &fixture.subscription) == CAPNWEB_OK);
     resolve_latest_pull(&fixture, "[\"export\",-13]");
@@ -901,6 +932,8 @@ static void keepalive_is_quiet_for_twenty_seconds_after_success(void) {
   before = fixture.captured_count;
   assert(iterate_kit_voice_stream_keepalive_if_due(&fixture.voice_stream) == CAPNWEB_OK);
   assert(fixture.captured_count == before + 2U);
+  assert(strstr(fixture.captured[before],
+                "\"payload\":{\"activation\":\"" TEST_ACTIVATION "\"}") != NULL);
   assert(strstr(fixture.captured[before], "voice-agent/keepalive") != NULL);
   fixture.clock_ms += ITERATE_KIT_VOICE_CALL_KEEPALIVE_MS - 1U;
   assert(iterate_kit_voice_stream_keepalive_if_due(&fixture.voice_stream) == CAPNWEB_OK);
@@ -965,7 +998,7 @@ int main(void) {
   failed_renewal_requires_a_fresh_incumbent_batch();
   repeated_silent_renewals_start_with_no_batches();
   fenced_voice_stream_ignores_late_callback();
-  opening_voice_stream_accepts_current_callback();
+  a_bound_device_passes_only_its_pressed_calls_events();
   terminal_fence_stops_later_events_in_its_batch();
   close_waits_for_server_callback_before_slot_reuse();
   append_frames_keeps_one_padded_base64_body();
