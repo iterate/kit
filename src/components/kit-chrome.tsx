@@ -23,7 +23,10 @@ export function KitChrome(props: {
   return (
     <div className="flex min-h-svh flex-col">
       <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b px-5 py-3 text-sm sm:px-8">
-        <a href="/" className="flex items-center gap-2 font-semibold tracking-tight">
+        <a
+          href={isDefault ? "/" : `/?${new URLSearchParams({ issuer: props.platformOrigin })}`}
+          className="flex items-center gap-2 font-semibold tracking-tight"
+        >
           <IterateLogo className="size-6" />
           Kit
         </a>
