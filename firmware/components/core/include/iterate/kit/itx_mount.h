@@ -131,9 +131,10 @@ enum capnweb_status iterate_kit_itx_mount_start(
     const struct iterate_kit_itx_mount_options *options);
 
 /**
- * Sends `whoami()` on the SESSION once a period, because the OS's idle close
- * counts APPLICATION messages and a PING is not one; the timing and the ping's
- * division of labour are in voice_device_profile.h. The session's `whoami()` is
+ * Sends `whoami()` on the SESSION once a heartbeat period, because Cloudflare
+ * sheds a socket whose Worker hears no APPLICATION message and a PING is not
+ * one; the timing and the ping's division of labour are in
+ * voice_device_profile.h. The session's `whoami()` is
  * the cheapest real call there is: the edge answers it from the admission gate
  * and no Durable Object is touched. (The project root's `whoami()` is NOT that
  * call: it wakes the project's context, and a device parked on it woke it once
@@ -143,6 +144,15 @@ enum capnweb_status iterate_kit_itx_mount_start(
  * on differently.
  */
 bool iterate_kit_itx_mount_probe_if_due(
+    struct iterate_kit_itx_mount *mount, uint64_t now_ms);
+
+/**
+ * True, once, when the pending probe has gone unanswered past
+ * ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS: the session is gone, and the
+ * caller replaces the socket generation. The mount stops waiting for that
+ * probe, so a late answer is ignored and the caller is told only once.
+ */
+bool iterate_kit_itx_mount_abandon_overdue_probe(
     struct iterate_kit_itx_mount *mount, uint64_t now_ms);
 
 /**

@@ -1357,7 +1357,7 @@ static void an_idle_session_probes_the_root_once_a_period(void) {
   before = iterate_kit_fake_platform_sent_count();
   assert(!sent_after_contains(before, "[\"whoami\"]"));
 
-  run_ms(ITERATE_KIT_VOICE_HOP_KEEPALIVE_MS + 500U);
+  run_ms(ITERATE_KIT_VOICE_SESSION_HEARTBEAT_MS + 500U);
   assert(sent_after_contains(before, "[\"whoami\"]"));
   /* One probe, not one a tick: an unanswered probe must not become a storm. */
   assert(sent_after_count(before, "[\"whoami\"]") == 1U);
@@ -1373,18 +1373,45 @@ static void an_idle_session_probes_the_root_once_a_period(void) {
  * SILENCE, and a probe answer on the same period is inbound — so a healthy
  * mounted board suppressed the very PINGs the watchdog was counting and rebooted
  * itself on a good network. This fake reports zero PONGs forever, which is
- * exactly that board: eight answered periods, well past the restart bound.
+ * exactly that board: sixteen answered periods, well past the restart bound.
  */
 static void answered_probes_are_liveness_without_any_pong(void) {
   size_t before;
   unsigned period;
   quiescent();
   before = iterate_kit_fake_platform_sent_count();
-  for (period = 0U; period < 8U; ++period) {
-    run_ms(ITERATE_KIT_VOICE_HOP_KEEPALIVE_MS + 500U);
+  for (period = 0U; period < 16U; ++period) {
+    run_ms(ITERATE_KIT_VOICE_SESSION_HEARTBEAT_MS + 500U);
     pump();
   }
-  assert(sent_after_count(before, "[\"whoami\"]") >= 7U);
+  assert(sent_after_count(before, "[\"whoami\"]") >= 15U);
+  assert(!iterate_kit_host_esp_idf_restart_requested());
+}
+
+/*
+ * AN UNANSWERED BEAT REPLACES THE SOCKET, NOT THE CHIP. A shed socket often
+ * never delivers its close; past the answer bound the loop asks the transport
+ * for a new generation, once, and the chip watchdog stays out of it.
+ */
+static void an_unanswered_heartbeat_replaces_the_socket_once(void) {
+  size_t before;
+  size_t restarts;
+  quiescent();
+  before = iterate_kit_fake_platform_sent_count();
+  restarts = iterate_kit_fake_platform_restarts_requested();
+  /* Step to the beat itself, so the bound below is measured from it. */
+  while (sent_after_count(before, "[\"whoami\"]") == 0U) step();
+  run_ms(ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS - 500U);
+  assert(iterate_kit_fake_platform_restarts_requested() == restarts);
+  run_ms(1000U);
+  assert(iterate_kit_fake_platform_restarts_requested() == restarts + 1U);
+  /* The next beat, answered: no second replacement, and no chip restart. */
+  pump();
+  before = iterate_kit_fake_platform_sent_count();
+  while (sent_after_count(before, "[\"whoami\"]") == 0U) step();
+  pump();
+  run_ms(ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS + 500U);
+  assert(iterate_kit_fake_platform_restarts_requested() == restarts + 1U);
   assert(!iterate_kit_host_esp_idf_restart_requested());
 }
 
@@ -1399,6 +1426,7 @@ int main(void) {
   nothing_physical_was_involved();
   an_idle_session_probes_the_root_once_a_period();
   answered_probes_are_liveness_without_any_pong();
+  an_unanswered_heartbeat_replaces_the_socket_once();
 
   speech_from_the_press_is_sent_at_once_in_order();
   the_press_is_one_append_on_the_provisioned_device();

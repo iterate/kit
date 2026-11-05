@@ -371,13 +371,44 @@ static void probes_the_session_once_a_period_and_one_at_a_time(void) {
   assert(!fixture.mount.probe_pending);
   assert(fixture.mount.probes_answered == 1U);
   assert(!iterate_kit_itx_mount_probe_if_due(
-      &fixture.mount, 1000U + ITERATE_KIT_VOICE_HOP_KEEPALIVE_MS - 1U));
+      &fixture.mount, 1000U + ITERATE_KIT_VOICE_SESSION_HEARTBEAT_MS - 1U));
   assert(fixture.mount.probes_sent == 1U);
 
   /* And again as soon as the period has run. */
   assert(iterate_kit_itx_mount_probe_if_due(
-      &fixture.mount, 1000U + ITERATE_KIT_VOICE_HOP_KEEPALIVE_MS));
+      &fixture.mount, 1000U + ITERATE_KIT_VOICE_SESSION_HEARTBEAT_MS));
   assert(fixture.mount.probes_sent == 2U);
+  capnweb_session_close(&fixture.session);
+}
+
+/*
+ * AN UNANSWERED BEAT IS A DEAD SESSION, SAID ONCE. A shed socket often never
+ * delivers its close; the caller replaces the socket on this answer, so it
+ * must come exactly once, and a late reply must not count as liveness.
+ */
+static void abandons_a_probe_unanswered_past_the_bound_once(void) {
+  struct fixture fixture;
+  mount_to_ready(&fixture);
+  assert(iterate_kit_itx_mount_probe_if_due(&fixture.mount, 1000U));
+  assert(!iterate_kit_itx_mount_abandon_overdue_probe(
+      &fixture.mount, 1000U + ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS));
+  assert(iterate_kit_itx_mount_abandon_overdue_probe(
+      &fixture.mount, 1001U + ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS));
+  assert(!fixture.mount.probe_pending);
+  assert(!iterate_kit_itx_mount_abandon_overdue_probe(
+      &fixture.mount, 2000U + ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS));
+  receive(&fixture, "[\"resolve\",4,{\"kind\":\"user\",\"id\":\"usr-kit\"}]");
+  assert(fixture.mount.probes_answered == 0U);
+  capnweb_session_close(&fixture.session);
+}
+
+/* An answered probe is never overdue, however long the board then idles. */
+static void an_answered_probe_is_never_abandoned(void) {
+  struct fixture fixture;
+  mount_to_ready(&fixture);
+  assert(iterate_kit_itx_mount_probe_if_due(&fixture.mount, 1000U));
+  receive(&fixture, "[\"resolve\",4,{\"kind\":\"user\",\"id\":\"usr-kit\"}]");
+  assert(!iterate_kit_itx_mount_abandon_overdue_probe(&fixture.mount, 1000000U));
   capnweb_session_close(&fixture.session);
 }
 
@@ -403,6 +434,8 @@ int main(void) {
   accepts_a_full_length_device_match();
   rejects_unusable_capability_matches_before_network_io();
   probes_the_session_once_a_period_and_one_at_a_time();
+  abandons_a_probe_unanswered_past_the_bound_once();
+  an_answered_probe_is_never_abandoned();
   refuses_to_probe_before_ready();
   return 0;
 }
