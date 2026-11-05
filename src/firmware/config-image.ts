@@ -22,7 +22,7 @@ const fieldStatusVoice = 6;
 /**
  * How a board says its connection status out loud before it reaches iterate: sung to a tune, spoken,
  * or not at all. The values are the names `configuration.c` decodes; a name the firmware does not know
- * sings Greensleeves.
+ * sings Greensleeves. Kit's form picks "spoken" by default, so a board sings only when asked to.
  */
 export const statusVoices = [
   { value: "greensleeves", label: "Greensleeves" },

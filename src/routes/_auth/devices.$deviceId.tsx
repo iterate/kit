@@ -360,7 +360,7 @@ function KitPage() {
               Status voice
             </FieldLabel>
             <FieldContent>
-              <Select name="status-voice" items={statusVoices} defaultValue="greensleeves">
+              <Select name="status-voice" items={statusVoices} defaultValue="spoken">
                 <SelectTrigger id="status-voice" className="w-full">
                   <SelectValue />
                 </SelectTrigger>

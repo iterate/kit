@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, getRouteApi } from "@tanstack/react-router";
 import { z } from "zod";
 import { LogInWithIterate } from "#/components/log-in-with-iterate.tsx";
 import { IterateLogo } from "#/components/iterate-logo.tsx";
+import { KitChrome } from "#/components/kit-chrome.tsx";
 import { Field, FieldContent, FieldLabel, FieldDescription } from "#/components/ui/field.tsx";
 import {
   Select,
@@ -28,6 +29,9 @@ export const Route = createFileRoute("/")({
   component: DevicePicker,
 });
 
+/** The root loader's: this deployment's default platform (routes/__root.tsx). */
+const root = getRouteApi("__root__");
+
 const deviceItems = firmwareCatalog.map((device) => ({ label: device.name, value: device.id }));
 
 function DevicePicker() {
@@ -36,63 +40,70 @@ function DevicePicker() {
     findFirmwareDevice(search.device || "")?.id || DEFAULT_DEVICE_ID,
   );
   const device = findFirmwareDevice(deviceId)!;
+  const { defaultIssuer } = root.useLoaderData();
   return (
-    <main className="flex min-h-svh items-center justify-center p-6">
-      <section className="flex w-full max-w-md flex-col gap-6">
-        <header className="flex items-center gap-3">
-          <IterateLogo className="size-9" />
-          <h1 className="text-xl font-semibold tracking-tight">Set up your device</h1>
-        </header>
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          Choose your device, then log in to choose its project and authorize access.
-        </p>
-        <Field>
-          <FieldLabel htmlFor="device">Device</FieldLabel>
-          <FieldContent>
-            <Select
-              items={deviceItems}
-              value={device.id}
-              onValueChange={(value) => {
-                if (value) setDeviceId(value);
-              }}
+    <KitChrome
+      platformOrigin={search.issuer || defaultIssuer}
+      defaultIssuer={defaultIssuer}
+      deviceId={device.id}
+    >
+      <main className="flex flex-1 items-center justify-center p-6">
+        <section className="flex w-full max-w-md flex-col gap-6">
+          <header className="flex items-center gap-3">
+            <IterateLogo className="size-9" />
+            <h1 className="text-xl font-semibold tracking-tight">Set up your device</h1>
+          </header>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            Choose your device, then log in to choose its project and authorize access.
+          </p>
+          <Field>
+            <FieldLabel htmlFor="device">Device</FieldLabel>
+            <FieldContent>
+              <Select
+                items={deviceItems}
+                value={device.id}
+                onValueChange={(value) => {
+                  if (value) setDeviceId(value);
+                }}
+              >
+                <SelectTrigger id="device" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {deviceItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription className="flex items-center gap-2">
+                <img
+                  src={`/vendors/${device.vendor.icon}`}
+                  alt={device.vendor.name}
+                  className="size-6 object-contain"
+                />
+                {device.description}
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            Each device has its own access to the project you choose. You can revoke its access at
+            any time.
+          </p>
+          {search.issuer ? (
+            <LogInWithIterate
+              formAction={`/devices/${device.id}/login?${new URLSearchParams({ issuer: search.issuer })}`}
             >
-              <SelectTrigger id="device" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {deviceItems.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <FieldDescription className="flex items-center gap-2">
-              <img
-                src={`/vendors/${device.vendor.icon}`}
-                alt={device.vendor.name}
-                className="size-6 object-contain"
-              />
-              {device.description}
-            </FieldDescription>
-          </FieldContent>
-        </Field>
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          Each device has its own access to the project you choose. You can revoke its access at any
-          time.
-        </p>
-        {search.issuer ? (
-          <LogInWithIterate
-            formAction={`/devices/${device.id}/login?${new URLSearchParams({ issuer: search.issuer })}`}
-          >
-            Log in with {new URL(search.issuer).host}
-          </LogInWithIterate>
-        ) : (
-          <LogInWithIterate formAction={`/devices/${device.id}/login`} />
-        )}
-      </section>
-    </main>
+              Log in with {new URL(search.issuer).host}
+            </LogInWithIterate>
+          ) : (
+            <LogInWithIterate formAction={`/devices/${device.id}/login`} />
+          )}
+        </section>
+      </main>
+    </KitChrome>
   );
 }

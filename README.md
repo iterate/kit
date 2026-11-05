@@ -17,15 +17,16 @@ Choose your board at `k.iterate.com`, then click **Log in with iterate**. Consen
 shows that board's name and vendor icon; choose its project and authorize access.
 Each setup starts a unique OAuth client before consent, including two boards of
 the same model. After sign-in, pick the project, enter Wi-Fi (2.4 GHz), pick how the board says its
-connection status (**Status voice**: Greensleeves by default, another tune, spoken, or off) and click
+connection status (**Status voice**: spoken by default, a tune such as Greensleeves, or off) and click
 **Flash device**. A dialog prepares the project, says which serial port to pick, flashes with
 esp-web-tools' `flash` (`src/firmware/flash-device.ts`), then says how to start a call on that
 board (`startCall` in `src/firmware/catalog.ts`). The browser's password manager can keep the
 Wi-Fi. **Set up another device** returns to the public selector and starts fresh
 consent; it never silently changes the authorized model.
 
-A board can belong to another iterate platform, a self-hosted one included: open
-`k.iterate.com/.auth/connect?issuer=<its origin>`. Kit checks the origin (https, not one of
+A board can belong to another iterate platform, a self-hosted one included: type its host in the
+header's **Platform** field (it opens `k.iterate.com/.auth/connect?issuer=https://<its host>`), or
+open that link directly. Kit checks the origin (https, not one of
 iterate's own zones, and its discovery document names it), then the selector's button says
 **Log in with &lt;its host&gt;** and consent happens there. The board is flashed with that
 platform's address. **Set up another device** keeps the platform.
