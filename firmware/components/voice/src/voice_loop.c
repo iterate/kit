@@ -395,6 +395,8 @@ EXT_RAM_BSS_ATTR static struct {
   uint32_t downlink_recycles;
   /* How many of those in a row have not yet produced a batch. */
   uint32_t downlink_recycles_running;
+  /* Connections replaced because the session's heartbeat went unanswered. */
+  uint32_t heartbeat_restarts;
   /* Diagnostics for a frozen device: see the pulse in the app loop. */
   uint32_t loop_count;
   uint64_t last_pulse_ms;
@@ -2028,6 +2030,7 @@ static size_t health_json(char *out, size_t capacity) {
          : (uint32_t)iterate_kit_voice_elapsed_ms(
                now, runtime.voice_stream->last_bridge_ms)},
     {"downlinkRecycles", runtime.downlink_recycles},
+    {"heartbeatRestarts", runtime.heartbeat_restarts},
     {"batchAgeMs",
      runtime.voice_stream->last_batch_ms == 0U
          ? 0U
@@ -3021,12 +3024,24 @@ void iterate_kit_voice_loop_step(void) {
      * between calls (itx_mount.h). Gated on outbox headroom like every other
      * producer: exhaustion is session-fatal in this peer, and a probe that
      * cannot be queued is simply the next period's probe.
+     *
+     * AN UNANSWERED BEAT REPLACES THE SOCKET, NOT THE CHIP. A shed socket
+     * often never delivers its close, so without this the board waits for the
+     * 420 s watchdog above and reboots; a new generation remounts in seconds.
      */
     if (runtime.connection.state == ITERATE_KIT_ITX_CONNECTION_READY) {
       struct iterate_kit_spsc_ring_metrics probe_outbox;
       iterate_kit_spsc_ring_metrics(&runtime.control_outbox, &probe_outbox);
       if (CONTROL_OUTBOX_SLOTS - probe_outbox.current_slots >= 3U) {
         (void)iterate_kit_itx_mount_probe_if_due(&runtime.connection.mount, now);
+      }
+      if (iterate_kit_itx_mount_abandon_overdue_probe(&runtime.connection.mount, now)) {
+        if (runtime.heartbeat_restarts < UINT32_MAX) ++runtime.heartbeat_restarts;
+        ESP_LOGW(
+            tag,
+            "session heartbeat unanswered for %us — replacing the socket",
+            (unsigned int)(ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS / 1000U));
+        iterate_kit_itx_transport_request_restart(&transport);
       }
     }
 

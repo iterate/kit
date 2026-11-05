@@ -436,7 +436,7 @@ bool iterate_kit_itx_mount_probe_if_due(
   }
   if (mount->last_probe_ms != 0U &&
       iterate_kit_voice_elapsed_ms(now_ms, mount->last_probe_ms) <
-          ITERATE_KIT_VOICE_HOP_KEEPALIVE_MS) {
+          ITERATE_KIT_VOICE_SESSION_HEARTBEAT_MS) {
     return false;
   }
   status = capnweb_session_call_path(
@@ -457,6 +457,17 @@ bool iterate_kit_itx_mount_probe_if_due(
   if (status != CAPNWEB_OK) return false;
   mount->probe_pending = true;
   if (mount->probes_sent < UINT32_MAX) ++mount->probes_sent;
+  return true;
+}
+
+bool iterate_kit_itx_mount_abandon_overdue_probe(
+    struct iterate_kit_itx_mount *mount, uint64_t now_ms) {
+  if (mount == NULL || !mount->probe_pending ||
+      iterate_kit_voice_elapsed_ms(now_ms, mount->last_probe_ms) <=
+          ITERATE_KIT_VOICE_SESSION_HEARTBEAT_ANSWER_MS) {
+    return false;
+  }
+  mount->probe_pending = false;
   return true;
 }
 
