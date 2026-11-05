@@ -1,6 +1,7 @@
-import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
+import { createFileRoute, getRouteApi, Outlet, redirect } from "@tanstack/react-router";
 import { z } from "zod";
 import { createIterateClient } from "iterate/app";
+import { KitChrome } from "#/components/kit-chrome.tsx";
 import { usePosthogIdentity } from "#/components/posthog.tsx";
 
 // Minting the device's access token needs the account scope on top of project access.
@@ -21,13 +22,24 @@ export const Route = createFileRoute("/_auth")({
   component: Identified,
 });
 
+/** The root loader's: this deployment's default platform (routes/__root.tsx). */
+const root = getRouteApi("__root__");
+
 function Identified() {
-  usePosthogIdentity(Route.useRouteContext().info.principal);
+  const { info, deviceSession } = Route.useRouteContext();
+  const { defaultIssuer } = root.useLoaderData();
+  usePosthogIdentity(info.principal);
   return (
-    <div className="mx-auto flex min-h-svh w-full max-w-5xl px-5 py-10 sm:px-8 sm:py-16">
-      <main className="flex w-full items-start lg:items-center">
-        <Outlet />
-      </main>
-    </div>
+    <KitChrome
+      platformOrigin={info.platformOrigin}
+      defaultIssuer={defaultIssuer}
+      deviceId={deviceSession.deviceId}
+    >
+      <div className="mx-auto flex w-full max-w-5xl flex-1 px-5 py-10 sm:px-8 sm:py-16">
+        <main className="flex w-full items-start lg:items-center">
+          <Outlet />
+        </main>
+      </div>
+    </KitChrome>
   );
 }
