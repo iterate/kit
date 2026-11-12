@@ -137,7 +137,7 @@ every PR.
 
 ```sh
 pnpm install
-pnpm dev                 # the installer, signing in against os.iterate.com
+pnpm dev                 # the installer
 pnpm typecheck && pnpm lint && pnpm format:check && pnpm test
 pnpm firmware:test:host  # needs cmake
 ```

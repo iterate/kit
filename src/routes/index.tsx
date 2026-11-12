@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { createFileRoute, getRouteApi } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
-import { LogInWithIterate } from "#/components/log-in-with-iterate.tsx";
 import { IterateLogo } from "#/components/iterate-logo.tsx";
 import { KitChrome } from "#/components/kit-chrome.tsx";
 import { Button } from "#/components/ui/button.tsx";
@@ -31,9 +30,6 @@ export const Route = createFileRoute("/")({
   component: DevicePicker,
 });
 
-/** The root loader's: this deployment's default platform (routes/__root.tsx). */
-const root = getRouteApi("__root__");
-
 const deviceItems = firmwareCatalog.map((device) => ({ label: device.name, value: device.id }));
 
 function DevicePicker() {
@@ -42,13 +38,8 @@ function DevicePicker() {
     findFirmwareDevice(search.device || "")?.id || DEFAULT_DEVICE_ID,
   );
   const device = findFirmwareDevice(deviceId)!;
-  const { defaultIssuer } = root.useLoaderData();
   return (
-    <KitChrome
-      platformOrigin={search.issuer || defaultIssuer}
-      defaultIssuer={defaultIssuer}
-      deviceId={device.id}
-    >
+    <KitChrome>
       <main className="flex flex-1 items-center justify-center p-6">
         <section className="flex w-full max-w-md flex-col gap-6">
           <header className="flex items-center gap-3">
@@ -56,7 +47,7 @@ function DevicePicker() {
             <h1 className="text-xl font-semibold tracking-tight">Set up your device</h1>
           </header>
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Choose your device, then log in to choose its project and authorize access.
+            Choose your device, then the mind it works for.
           </p>
           <Field>
             <FieldLabel htmlFor="device">Device</FieldLabel>
@@ -92,8 +83,8 @@ function DevicePicker() {
             </FieldContent>
           </Field>
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Each device has its own access to the project you choose. You can revoke its access at
-            any time.
+            Each device has its own access to the mind you choose. You can revoke its access at any
+            time.
           </p>
           <form
             method="get"
@@ -114,18 +105,9 @@ function DevicePicker() {
               </Button>
             </div>
             <FieldDescription>
-              A mind is iterate at its own domain. Below is the old platform, os.iterate.com.
+              A mind is iterate at its own domain: type it, then sign in there and allow the device.
             </FieldDescription>
           </form>
-          {search.issuer ? (
-            <LogInWithIterate
-              formAction={`/devices/${device.id}/login?${new URLSearchParams({ issuer: search.issuer })}`}
-            >
-              Log in with {new URL(search.issuer).host}
-            </LogInWithIterate>
-          ) : (
-            <LogInWithIterate formAction={`/devices/${device.id}/login`} />
-          )}
         </section>
       </main>
     </KitChrome>

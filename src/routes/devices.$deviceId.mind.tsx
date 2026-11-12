@@ -1,5 +1,5 @@
 import { skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, getRouteApi, notFound } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
 import { UsbIcon } from "lucide-react";
 import { z } from "zod";
 import { IterateLogo } from "#/components/iterate-logo.tsx";
@@ -54,9 +54,6 @@ export const Route = createFileRoute("/devices/$deviceId/mind")({
   component: MindSetup,
 });
 
-/** The root loader's: this deployment's default platform (routes/__root.tsx). */
-const root = getRouteApi("__root__");
-
 interface MindSetupInput extends SetupInput {
   signIn: MindSignIn;
 }
@@ -66,7 +63,6 @@ function MindSetup() {
   const navigate = Route.useNavigate();
   const { device } = Route.useRouteContext();
   const { firmware } = Route.useLoaderData();
-  const { defaultIssuer } = root.useLoaderData();
   const queryClient = useQueryClient();
   const signInKey = ["kit", "mind-sign-in", device.id];
   // The board's grant, once the issuer sent the browser back: held in this page's memory only.
@@ -119,7 +115,7 @@ function MindSetup() {
   const refused = search.error ? search.error_description || search.error : null;
 
   return (
-    <KitChrome platformOrigin={defaultIssuer} defaultIssuer={defaultIssuer} deviceId={device.id}>
+    <KitChrome>
       <div className="mx-auto flex w-full max-w-5xl flex-1 px-5 py-10 sm:px-8 sm:py-16">
         <main className="grid w-full gap-10 lg:grid-cols-[minmax(0,0.8fr)_minmax(28rem,1.2fr)] lg:gap-16">
           <section className="flex max-w-sm flex-col gap-6">
