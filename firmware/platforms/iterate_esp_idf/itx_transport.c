@@ -12,6 +12,7 @@
 #include "esp_cpu.h"
 #include "esp_mac.h"
 #include "esp_task_wdt.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 
@@ -344,6 +345,82 @@ static void mark_socket_disconnected(
   }
 }
 
+#define WIFI_LOG "iterate-wifi"
+
+/** A scan runs because the network was not found: the join waits for it, for at most
+ *  WIFI_LOOK_AROUND_MAX_US, so a scan that never reports cannot stop the joins. */
+static uint32_t wifi_looking_around;
+static int64_t wifi_looking_around_since_us;
+#define WIFI_LOOK_AROUND_MAX_US 15000000
+/** Joins in a row that found no network of the name. Read and written on the event task alone. */
+static uint32_t wifi_misses;
+/** The name the station joins: the configured one, or the spelling the scan found. */
+static char joined_name[33];
+
+/** `name` without the spaces at its ends, as a start and a length. */
+static const char *without_end_spaces(const char *name, size_t *length) {
+  const char *start = name;
+  size_t size = strnlen(name, 32);
+  while (size > 0U && *start == ' ') {
+    start += 1;
+    size -= 1U;
+  }
+  while (size > 0U && start[size - 1U] == ' ') size -= 1U;
+  *length = size;
+  return start;
+}
+
+/**
+ * THE SCAN'S ANSWER, after a join that found no network of the configured name. The console gets
+ * every network in reach, names in quotes, so a mistyped name or a 5 GHz-only network shows.
+ *
+ * A network whose name is the configured one but for spaces at its ends becomes the one to join: a
+ * router can broadcast "home " with a space nobody sees or types, and the board would otherwise
+ * answer "not found" for ever. The password and every other setting stay as configured.
+ */
+static void look_for_the_network_by_another_spelling(
+    struct iterate_kit_itx_transport *transport) {
+  static wifi_ap_record_t networks[20];
+  uint16_t count = sizeof(networks) / sizeof(networks[0]);
+  size_t wanted_length;
+  const char *wanted = without_end_spaces(
+      transport->options.configuration->wifi_ssid, &wanted_length);
+  wifi_config_t station;
+  if (esp_wifi_scan_get_ap_records(&count, networks) != ESP_OK) return;
+  ESP_LOGW(WIFI_LOG, "2.4 GHz networks in reach: %u", (unsigned)count);
+  for (uint16_t index = 0; index < count; index += 1U) {
+    ESP_LOGW(
+        WIFI_LOG,
+        "  \"%s\" channel %u, %d dBm",
+        (const char *)networks[index].ssid,
+        (unsigned)networks[index].primary,
+        (int)networks[index].rssi);
+  }
+  /* strongest first, as the scan sorts them */
+  for (uint16_t index = 0; index < count; index += 1U) {
+    const char *seen = (const char *)networks[index].ssid;
+    size_t seen_length;
+    const char *seen_core = without_end_spaces(seen, &seen_length);
+    if (seen_length == 0U || seen_length != wanted_length ||
+        memcmp(seen_core, wanted, wanted_length) != 0 ||
+        strncmp(seen, joined_name, 32) == 0) {
+      continue;
+    }
+    if (esp_wifi_get_config(WIFI_IF_STA, &station) != ESP_OK) return;
+    memset(station.sta.ssid, 0, sizeof(station.sta.ssid));
+    memcpy(station.sta.ssid, seen, strnlen(seen, 32));
+    if (esp_wifi_set_config(WIFI_IF_STA, &station) != ESP_OK) return;
+    memset(joined_name, 0, sizeof(joined_name));
+    memcpy(joined_name, seen, strnlen(seen, 32));
+    wifi_misses = 0U;
+    ESP_LOGW(
+        WIFI_LOG,
+        "joining \"%s\": the configured name but for spaces at its ends",
+        joined_name);
+    return;
+  }
+}
+
 static void wifi_event(
     void *context,
     esp_event_base_t base,
@@ -360,6 +437,13 @@ static void wifi_event(
     wake_network_task(transport);
     return;
   }
+  if (event_id == WIFI_EVENT_SCAN_DONE) {
+    look_for_the_network_by_another_spelling(transport);
+    atomic_store_u32(&wifi_looking_around, 0U);
+    atomic_store_u32(&transport->wifi_retry_now, 1U);
+    wake_network_task(transport);
+    return;
+  }
   if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
     const wifi_event_sta_disconnected_t *disconnected = event_data;
     atomic_store_u32(&transport->wifi_connected, 0U);
@@ -370,6 +454,30 @@ static void wifi_event(
           &transport->last_wifi_disconnect_reason,
           (int32_t)disconnected->reason,
           __ATOMIC_RELEASE);
+      /* ESP-IDF's Wi-Fi library says nothing when the network is not found, and little else. */
+      ESP_LOGW(
+          WIFI_LOG,
+          "not joined to \"%s\": reason %d%s",
+          joined_name,
+          (int)disconnected->reason,
+          disconnected->reason == WIFI_REASON_NO_AP_FOUND
+              ? " (no 2.4 GHz network of that name in reach)"
+              : disconnected->reason == WIFI_REASON_AUTH_FAIL ||
+                      disconnected->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+                      disconnected->reason == WIFI_REASON_HANDSHAKE_TIMEOUT
+                  ? " (the password was refused)"
+                  : "");
+      /*
+       * A network that is not found is looked for by scan, at the first miss and every eighth
+       * after it. The join waits for the scan: a join would end it with nothing found.
+       */
+      if (disconnected->reason == WIFI_REASON_NO_AP_FOUND &&
+          wifi_misses++ % 8U == 0U &&
+          esp_wifi_scan_start(NULL, false) == ESP_OK) {
+        __atomic_store_n(&wifi_looking_around_since_us, esp_timer_get_time(), __ATOMIC_RELEASE);
+        atomic_store_u32(&wifi_looking_around, 1U);
+        return;
+      }
     }
     atomic_store_u32(&transport->wifi_retry_later, 1U);
     wake_network_task(transport);
@@ -918,7 +1026,11 @@ static void network_task(void *context) {
     }
     if (!wifi_connected &&
         wifi_retry_at_us != 0 &&
-        now_us >= wifi_retry_at_us) {
+        now_us >= wifi_retry_at_us &&
+        (atomic_load_u32(&wifi_looking_around) == 0U ||
+         now_us - __atomic_load_n(&wifi_looking_around_since_us, __ATOMIC_ACQUIRE) >
+             WIFI_LOOK_AROUND_MAX_US)) {
+      atomic_store_u32(&wifi_looking_around, 0U);
       const esp_err_t error = esp_wifi_connect();
       iterate_kit_atomic_saturating_increment_relaxed_u32(
           &transport->wifi_connect_attempts);
@@ -1260,6 +1372,10 @@ enum iterate_kit_status iterate_kit_itx_transport_start(
       wifi_configuration.sta.ssid,
       transport->options.configuration->wifi_ssid,
       ssid_length);
+  memset(joined_name, 0, sizeof(joined_name));
+  memcpy(joined_name, transport->options.configuration->wifi_ssid, ssid_length);
+  atomic_store_u32(&wifi_looking_around, 0U);
+  wifi_misses = 0U;
   memcpy(
       wifi_configuration.sta.password,
       transport->options.configuration->wifi_password,

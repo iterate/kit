@@ -233,7 +233,11 @@ main import is then the mind's root, so the mount makes one call, `provide`
 says "set me up again".
 
 At boot, firmware rejects a missing or invalid partition, joins Wi-Fi and
-mounts. Health classifies provisioning, Wi-Fi/authentication, mount and audio
+mounts. A join that fails says why on the console (`iterate-wifi: not joined to
+"<name>": reason <n>`). When no network has the configured name, the board scans,
+lists the 2.4 GHz networks in reach with their names in quotes, and joins the one
+whose name is the configured name but for spaces at its ends: a router can
+broadcast `home ` with a space that nobody sees or types. Health classifies provisioning, Wi-Fi/authentication, mount and audio
 failures.
 
 The device dials `wss://<os base url host>/api` — the OS's public endpoint — with
