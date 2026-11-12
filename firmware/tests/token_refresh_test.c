@@ -210,6 +210,35 @@ static void steps_an_exchange_over_a_stream(void) {
   for (size_t index = 0U; index < sizeof(refresh.request); ++index) assert(refresh.request[index] == 0U);
 }
 
+static enum iterate_kit_byte_stream_result blocked_connect(void *context) {
+  struct scripted_stream *stream = context;
+  ++stream->connects;
+  return ITERATE_KIT_BYTE_STREAM_WOULD_BLOCK;
+}
+
+/* A deadline that aborts a connect still in its handshake closes the stream. */
+static void closes_a_stream_still_connecting(void) {
+  static struct iterate_kit_token_refresh refresh;
+  static uint8_t response[256];
+  const struct iterate_kit_byte_stream_ops ops = {
+    blocked_connect, scripted_read, scripted_write, scripted_close, NULL, NULL,
+  };
+  struct scripted_stream stream;
+  struct iterate_kit_websocket_endpoint endpoint;
+  struct iterate_kit_tokens tokens;
+  memset(&stream, 0, sizeof(stream));
+  assert(iterate_kit_websocket_endpoint_parse("wss://iterate.example.com/api", &endpoint));
+  assert(iterate_kit_token_refresh_begin(&refresh, &ops, &stream, &endpoint, client_id, "t",
+                                         "https://iterate.example.com/api", response,
+                                         sizeof(response)) == ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK);
+  assert(iterate_kit_token_refresh_step(&refresh, &tokens) == ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK);
+  assert(stream.connects == 1);
+  iterate_kit_token_refresh_close(&refresh);
+  assert(stream.closes == 1);
+  iterate_kit_token_refresh_close(&refresh);
+  assert(stream.closes == 1);
+}
+
 static void builds_the_resource(void) {
   char resource[64];
   assert(iterate_kit_token_refresh_resource("https://iterate.example.com", resource,
@@ -227,6 +256,7 @@ int main(void) {
   parses_a_chunked_answer();
   classifies_refusals_and_failures();
   steps_an_exchange_over_a_stream();
+  closes_a_stream_still_connecting();
   builds_the_resource();
   return 0;
 }

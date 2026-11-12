@@ -454,7 +454,13 @@ enum iterate_kit_token_refresh_result iterate_kit_token_refresh_step(
 
 void iterate_kit_token_refresh_close(struct iterate_kit_token_refresh *refresh) {
   if (refresh == NULL) return;
-  if (refresh->connected && refresh->stream != NULL)
+  /*
+   * Whatever state the connect reached: a deadline can abort it mid-handshake
+   * (the Mac's DNS, TCP and TLS each step), and a stream left open there would
+   * carry the old handshake into the next exchange. The byte stream takes a
+   * repeated close harmlessly (websocket_client.h).
+   */
+  if (refresh->active && refresh->stream != NULL)
     refresh->stream->close(refresh->stream_context);
   if (refresh->response != NULL) memset(refresh->response, 0, refresh->response_capacity);
   memset(refresh->request, 0, sizeof(refresh->request));
