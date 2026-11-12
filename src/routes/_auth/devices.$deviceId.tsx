@@ -1,16 +1,9 @@
-import type { ComponentProps } from "react";
 import { skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, getRouteApi } from "@tanstack/react-router";
 import { z } from "zod";
 import { Button } from "#/components/ui/button.tsx";
 import { Field, FieldContent, FieldDescription, FieldLabel } from "#/components/ui/field.tsx";
 import { Input } from "#/components/ui/input.tsx";
-import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-  InputGroupInput,
-} from "#/components/ui/input-group.tsx";
 import { IterateLogo } from "#/components/iterate-logo.tsx";
 import {
   Select,
@@ -20,10 +13,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "#/components/ui/select.tsx";
-import { EyeIcon, EyeOffIcon, LogOutIcon, UsbIcon } from "lucide-react";
+import { LogOutIcon, UsbIcon } from "lucide-react";
 import { ensureVoiceAgent } from "@iterate-com/voice/install";
 import { SetupWizard, type SetupInput } from "../../components/setup-wizard.tsx";
-import { isStatusVoice, statusVoices } from "../../firmware/config-image.ts";
+import {
+  horizontalFieldClassName,
+  readWifiFields,
+  WifiFields,
+} from "../../components/wifi-fields.tsx";
+
+/** The old platform's setup also names the project, and its OpenAI key when it has none. */
+interface ProjectSetupInput extends SetupInput {
+  project: { id: string; slug: string };
+  openaiKey: string;
+}
 import {
   FIRMWARE_REPOSITORY,
   findFirmwareDevice,
@@ -59,9 +62,6 @@ export const Route = createFileRoute("/_auth/devices/$deviceId")({
 /** The root loader's: this deployment's dash, when it has one (routes/__root.tsx). */
 const root = getRouteApi("__root__");
 
-const horizontalFieldClassName =
-  "grid gap-2 sm:grid-cols-[8.5rem_minmax(0,1fr)] sm:items-start sm:gap-4";
-
 // TODO: feedback from flashing a Home Assistant Voice Preview Edition against a self-hosted platform:
 // - a board whose platform has gone away just fails its calls; nothing tells the person
 // - Log out is blocked by a platform that's gone, like device login was (the shared app-server sign-out)
@@ -90,7 +90,7 @@ function KitPage() {
   const webSerial = "serial" in navigator;
   const platformHost = new URL(info.platformOrigin).host;
   const preparing = useMutation({
-    mutationFn: async (input: SetupInput) => {
+    mutationFn: async (input: ProjectSetupInput) => {
       try {
         using itx = await api.projects.get(input.project.id);
         const voice = await ensureVoiceAgent(itx, input.openaiKey);
@@ -171,21 +171,11 @@ function KitPage() {
             event.preventDefault();
             if (!project) return;
             const form = new FormData(event.currentTarget);
-            const wifi = {
-              ssid: String(form.get("wifi-ssid")),
-              password: String(form.get("wifi-password")),
-            };
-            // Chrome offers to save it, then fills these fields next time (they're marked
-            // username and current-password); an open network has nothing to keep
-            if (wifi.password && "PasswordCredential" in window)
-              navigator.credentials
-                .store(new PasswordCredential({ id: wifi.ssid, password: wifi.password }))
-                .catch((error: unknown) => console.warn("kit.wifi_not_saved", error));
-            const statusVoice = String(form.get("status-voice"));
-            if (!isStatusVoice(statusVoice)) throw new Error(`Unknown status voice ${statusVoice}`);
+            const { wifi, statusVoice } = readWifiFields(form);
             preparing.mutate({
               project,
               openaiKey: String(form.get("openai-key") || ""),
+              target: { kind: "project", name: project.slug },
               wifi,
               statusVoice,
             });
@@ -323,63 +313,7 @@ function KitPage() {
             </p>
           )}
 
-          <Field className={horizontalFieldClassName}>
-            <FieldLabel htmlFor="wifi-ssid" className="sm:pt-2">
-              Wi-Fi network
-            </FieldLabel>
-            <FieldContent>
-              <Input
-                id="wifi-ssid"
-                name="wifi-ssid"
-                placeholder="Network name (SSID)"
-                autoComplete="username"
-                required
-              />
-              <FieldDescription>
-                2.4 GHz only: the boards can’t join 5 GHz networks.
-              </FieldDescription>
-            </FieldContent>
-          </Field>
-
-          <Field className={horizontalFieldClassName}>
-            <FieldLabel htmlFor="wifi-password" className="sm:pt-2">
-              Wi-Fi password
-            </FieldLabel>
-            <FieldContent>
-              <PasswordInput
-                id="wifi-password"
-                name="wifi-password"
-                autoComplete="current-password"
-              />
-              <FieldDescription>Leave empty for an open network.</FieldDescription>
-            </FieldContent>
-          </Field>
-
-          <Field className={horizontalFieldClassName}>
-            <FieldLabel htmlFor="status-voice" className="sm:pt-2">
-              Status voice
-            </FieldLabel>
-            <FieldContent>
-              <Select name="status-voice" items={statusVoices} defaultValue="spoken">
-                <SelectTrigger id="status-voice" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {statusVoices.map((voice) => (
-                      <SelectItem key={voice.value} value={voice.value}>
-                        {voice.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FieldDescription>
-                How the board says “Connecting to Wi-Fi”, “Ready” and “Call ended”. A board with a
-                wake word also answers it with “Hello”.
-              </FieldDescription>
-            </FieldContent>
-          </Field>
+          <WifiFields />
 
           <div className="grid sm:grid-cols-[8.5rem_minmax(0,1fr)] sm:gap-4">
             <div className="flex flex-col gap-2 sm:col-start-2">
@@ -413,26 +347,3 @@ function KitPage() {
 
 /** A dropped connection to the platform, which preparing a device retries once. */
 class ConnectionDropped extends Error {}
-
-/** A password field with a show/hide button. Whether it shows lives in the query cache (like the
- *  wizard's flash progress), per field. */
-function PasswordInput(props: ComponentProps<"input"> & { id: string }) {
-  const queryClient = useQueryClient();
-  const shownKey = ["kit", "password-shown", props.id];
-  const shown = useQuery({ queryKey: shownKey, queryFn: skipToken, initialData: false }).data;
-  return (
-    <InputGroup>
-      <InputGroupInput {...props} type={shown ? "text" : "password"} spellCheck={false} />
-      <InputGroupAddon align="inline-end">
-        <InputGroupButton
-          size="icon-xs"
-          aria-label="Show password"
-          aria-pressed={shown}
-          onClick={() => queryClient.setQueryData(shownKey, !shown)}
-        >
-          {shown ? <EyeOffIcon /> : <EyeIcon />}
-        </InputGroupButton>
-      </InputGroupAddon>
-    </InputGroup>
-  );
-}

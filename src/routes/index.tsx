@@ -4,7 +4,9 @@ import { z } from "zod";
 import { LogInWithIterate } from "#/components/log-in-with-iterate.tsx";
 import { IterateLogo } from "#/components/iterate-logo.tsx";
 import { KitChrome } from "#/components/kit-chrome.tsx";
+import { Button } from "#/components/ui/button.tsx";
 import { Field, FieldContent, FieldLabel, FieldDescription } from "#/components/ui/field.tsx";
+import { Input } from "#/components/ui/input.tsx";
 import {
   Select,
   SelectContent,
@@ -93,6 +95,28 @@ function DevicePicker() {
             Each device has its own access to the project you choose. You can revoke its access at
             any time.
           </p>
+          <form
+            method="get"
+            action={`/devices/${device.id}/mind`}
+            className="flex flex-col gap-2 rounded-lg border p-4"
+          >
+            <FieldLabel htmlFor="mind-address">Set it up for a mind</FieldLabel>
+            <div className="flex gap-2">
+              <Input
+                id="mind-address"
+                name="address"
+                placeholder="example.com"
+                autoComplete="url"
+                required
+              />
+              <Button type="submit" variant="outline">
+                Continue
+              </Button>
+            </div>
+            <FieldDescription>
+              A mind is iterate at its own domain. Below is the old platform, os.iterate.com.
+            </FieldDescription>
+          </form>
           {search.issuer ? (
             <LogInWithIterate
               formAction={`/devices/${device.id}/login?${new URLSearchParams({ issuer: search.issuer })}`}

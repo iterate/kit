@@ -15,7 +15,8 @@ export function deviceClientMetadata(url: URL): Response | null {
       client_name: device.name,
       client_uri: device.vendor.url,
       logo_uri: `${url.origin}/vendors/${device.vendor.icon}`,
-      redirect_uris: [`${url.origin}/.auth/callback`],
+      // the old platform's sign-in (Kit's Worker), and a mind's (in the page: mind-sign-in.ts)
+      redirect_uris: [`${url.origin}/.auth/callback`, `${url.origin}/devices/${device.id}/mind`],
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
