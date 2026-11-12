@@ -30,8 +30,9 @@ static bool valid_options(
       options->outbound_buffer != NULL &&
       options->outbound_buffer_size > 0U &&
       options->send_text != NULL &&
-      options->project_id != NULL &&
-      options->project_api_key != NULL &&
+      (options->mind ||
+       (options->project_id != NULL &&
+        options->project_api_key != NULL)) &&
       options->capability_match != NULL &&
       options->capability.dispatch != NULL;
 }
@@ -170,6 +171,7 @@ enum capnweb_status iterate_kit_itx_connection_open(
     connection->options.project_api_key,
     connection->options.capability_match,
     connection->options.capability,
+    connection->options.mind,
   };
   status = iterate_kit_itx_mount_start(
       &connection->mount, &mount_options);

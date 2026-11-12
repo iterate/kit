@@ -9,6 +9,9 @@
  */
 
 #include "iterate/kit/configuration.h"
+
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -39,6 +42,26 @@ iterate_kit_platform_read_provisioning(
 
 const char *iterate_kit_platform_provisioning_status_name(
     enum iterate_kit_platform_provisioning_status status);
+
+/**
+ * A MIND BOARD'S NEWEST REFRESH TOKEN (iterate/kit/token_refresh.h). Each
+ * refresh rotates the token, so the board keeps the newer one where a restart
+ * finds it. It is kept with a digest of the image's own token: a reflash with
+ * a new image starts again from that image's token, never from a token of the
+ * grant before.
+ *
+ * load copies the kept token for this image into `destination`, or the
+ * image's own when none is kept. store keeps `token` for this image; false
+ * when it could not (the board then refreshes with the older token, which the
+ * issuer still takes once).
+ */
+void iterate_kit_platform_refresh_token_load(
+    const struct iterate_kit_configuration *configuration,
+    char *destination,
+    size_t capacity);
+bool iterate_kit_platform_refresh_token_store(
+    const struct iterate_kit_configuration *configuration,
+    const char *token);
 
 #ifdef __cplusplus
 }

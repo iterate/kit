@@ -1828,6 +1828,8 @@ static bool initialise_connection(void) {
   options.send_text_context = &transport;
   options.project_id = runtime.configuration.project_id;
   options.project_api_key = runtime.configuration.project_api_key;
+  options.mind = runtime.configuration.platform ==
+      ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
   options.capability_match = capability_match;
   options.capability = iterate_kit_peer_capability(&runtime.peer);
   /*

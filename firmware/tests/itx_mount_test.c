@@ -61,6 +61,7 @@ static void start_mount(struct fixture *fixture) {
     "operator-secret-never-log",
     "itx.clients.m5stick_s3",
     {inert_dispatch, fixture, NULL},
+    false,
   };
   assert(
       iterate_kit_itx_mount_start(&fixture->mount, &options) ==
@@ -285,6 +286,7 @@ static enum capnweb_status start_with_match(
     "operator-secret-never-log",
     capability_match,
     {inert_dispatch, fixture, NULL},
+    false,
   };
   fixture_init(fixture);
   return iterate_kit_itx_mount_start(&fixture->mount, &options);
@@ -425,7 +427,54 @@ static void refuses_to_probe_before_ready(void) {
   capnweb_session_close(&fixture.session);
 }
 
+/*
+ * A MIND'S SESSION IS ALREADY THE MIND. The upgrade's bearer made the main
+ * import the mind's root context, so the mount's one call is `provide` on
+ * import 0, the probe asks that root's `whoami()`, and close releases the rule
+ * alone: the main import is the session's, never the mount's.
+ */
+static void mounts_on_a_mind_with_one_call(void) {
+  struct fixture fixture;
+  const struct iterate_kit_itx_mount_options options = {
+    &fixture.session,
+    NULL,
+    NULL,
+    "itx.clients.m5stick_s3",
+    {inert_dispatch, &fixture, NULL},
+    true,
+  };
+  fixture_init(&fixture);
+  assert(iterate_kit_itx_mount_start(&fixture.mount, &options) == CAPNWEB_OK);
+  assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_PROVIDING);
+  assert(fixture.captured_count == 2U);
+  assert(strcmp(
+      fixture.captured[0],
+      "[\"push\",[\"pipeline\",0,[\"provide\"],"
+      "[\"itx.clients.m5stick_s3\",[\"export\",-1]]]]") == 0);
+  assert(strcmp(fixture.captured[1], "[\"pull\",1]") == 0);
+
+  receive(&fixture, "[\"resolve\",1,[\"export\",-10]]");
+  assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_READY);
+  assert(fixture.mount.has_rule_capability);
+  assert(!fixture.mount.has_project_capability);
+  assert(!fixture.mount.has_session_capability);
+  assert(fixture.mount.project_capability.id == 0);
+
+  assert(iterate_kit_itx_mount_probe_if_due(&fixture.mount, 1000U));
+  assert(strstr(fixture.captured[fixture.captured_count - 2U],
+                "[\"push\",[\"pipeline\",0,[\"whoami\"]") != NULL);
+
+  {
+    const size_t before = fixture.captured_count;
+    assert(iterate_kit_itx_mount_close(&fixture.mount) == CAPNWEB_OK);
+    /* the rule's release and nothing else */
+    assert(fixture.captured_count == before + 1U);
+    assert(strstr(fixture.captured[before], "[\"release\",-10,") != NULL);
+  }
+}
+
 int main(void) {
+  mounts_on_a_mind_with_one_call();
   mounts_and_retains_the_project_and_the_rule();
   authentication_rejection_is_terminal_and_not_retried();
   invalid_project_result_is_classified_and_releases_session();

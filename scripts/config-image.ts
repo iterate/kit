@@ -5,6 +5,9 @@
 //   node scripts/config-image.ts image --wifi-ssid <ssid> \
 //     --wifi-password <password> --os-base-url https://os.iterate.com --project-id prj-voice \
 //     --project-api-key "$KIT_TOKEN" [--status-voice greensleeves] --out /tmp/cfg.bin
+//   node scripts/config-image.ts image --wifi-ssid <ssid> \
+//     --os-base-url https://iterate.example.com --client-id <client metadata URL> \
+//     --refresh-token-file <file> --out /tmp/cfg.bin          (a mind board)
 //   node scripts/config-image.ts offset <target>
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,9 +28,14 @@ export function image(options: {
   /** Empty, the default, for an open network. */
   wifiPassword?: string;
   osBaseUrl: string;
-  projectId: string;
-  /** A personal access token scoped to the project. */
-  projectApiKey: string;
+  /** The old platform: the project. */
+  projectId?: string;
+  /** The old platform: a personal access token scoped to the project. */
+  projectApiKey?: string;
+  /** A mind: the OAuth client the grant belongs to. */
+  clientId?: string;
+  /** A mind: a file holding the grant's refresh token, so it never sits in argv. */
+  refreshTokenFile?: string;
   /** greensleeves (the default), daisy-bell, auld-lang-syne, lass-of-aughrim, spoken or off. */
   statusVoice?: string;
   out: string;
@@ -38,17 +46,34 @@ export function image(options: {
   const bytes = encodeDeviceConfiguration(
     {
       wifi: { ssid: options.wifiSsid, password: options.wifiPassword || "" },
-      iterate: {
-        baseUrl: options.osBaseUrl,
-        projectId: options.projectId,
-        projectApiKey: options.projectApiKey,
-      },
+      iterate: credentialOf(options),
       statusVoice,
     },
     IMAGE_BYTES,
   );
-  writeFileSync(options.out, bytes);
-  return `wrote ${options.out} (${bytes.byteLength} bytes) for ${options.projectId} @ ${options.osBaseUrl}`;
+  writeFileSync(options.out, bytes, { mode: 0o600 });
+  return `wrote ${options.out} (${bytes.byteLength} bytes) for ${options.projectId || "a mind"} @ ${options.osBaseUrl}`;
+}
+
+function credentialOf(options: Parameters<typeof image>[0]) {
+  if (options.clientId || options.refreshTokenFile) {
+    if (!options.clientId || !options.refreshTokenFile)
+      throw new Error("A mind board needs --client-id and --refresh-token-file.");
+    return {
+      baseUrl: options.osBaseUrl,
+      clientId: options.clientId,
+      refreshToken: readFileSync(options.refreshTokenFile, "utf8").trim(),
+    };
+  }
+  if (!options.projectId || !options.projectApiKey)
+    throw new Error(
+      "Name a project (--project-id, --project-api-key) or a mind (--client-id, --refresh-token-file).",
+    );
+  return {
+    baseUrl: options.osBaseUrl,
+    projectId: options.projectId,
+    projectApiKey: options.projectApiKey,
+  };
 }
 
 /** Prints the target's iterate_kit offset (its sdkconfig.defaults' partition table): esptool's address. */

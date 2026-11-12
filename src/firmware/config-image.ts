@@ -9,8 +9,10 @@ const CONFIG_HEADER_BYTES = 16;
 /**
  * Field tags, matching `configuration.c` in the firmware exactly.
  *
- * These numbers are the wire format. The firmware requires the first five. The status voice (6) is
- * optional to it, so an older image still boots (and sings Greensleeves), and older firmware skips it.
+ * These numbers are the wire format. The firmware requires the first three, then ONE platform's
+ * credential whole: the old platform's project id and key (4, 5), or a mind's OAuth client id and
+ * refresh token (7, 8). The status voice (6) is optional to it, so an older image still boots (and
+ * sings Greensleeves), and older firmware skips it.
  */
 const fieldWifiSsid = 1;
 const fieldWifiPassword = 2;
@@ -18,6 +20,8 @@ const fieldOsBaseUrl = 3;
 const fieldProjectId = 4;
 const fieldProjectApiKey = 5;
 const fieldStatusVoice = 6;
+const fieldOauthClientId = 7;
+const fieldOauthRefreshToken = 8;
 
 /**
  * How a board says its connection status out loud before it reaches iterate: sung to a tune, spoken,
@@ -45,19 +49,37 @@ const wifiPasswordMaxBytes = 64;
 const osBaseUrlMaxBytes = 128;
 const projectIdMaxBytes = 64;
 const projectApiKeyMaxBytes = 128;
+const oauthClientIdMaxBytes = 192;
+const oauthTokenMaxBytes = 160;
+
+/** A board of the old platform (os.iterate.com): a project and a token with no expiry. */
+export interface ProjectCredential {
+  baseUrl: string;
+  projectId: string;
+  projectApiKey: string;
+}
+
+/** A board of a mind: the mind's platform origin (`https://iterate.<domain>`), the OAuth client
+ *  the person authorized for it, and that grant's refresh token, which the board trades for an
+ *  access token before each connection (firmware/components/core/include/iterate/kit/token_refresh.h). */
+export interface MindCredential {
+  baseUrl: string;
+  clientId: string;
+  refreshToken: string;
+}
 
 export interface DeviceConfiguration {
   wifi: {
     ssid: string;
     password: string;
   };
-  iterate: {
-    baseUrl: string;
-    projectId: string;
-    projectApiKey: string;
-  };
+  iterate: ProjectCredential | MindCredential;
   statusVoice: StatusVoice;
 }
+
+export const isMindCredential = (
+  credential: ProjectCredential | MindCredential,
+): credential is MindCredential => "refreshToken" in credential;
 
 export function normalizeOsBaseUrl(value: string) {
   const trimmed = value.trim();
@@ -129,21 +151,7 @@ export function encodeDeviceConfiguration(
         value: normalizeOsBaseUrl(configuration.iterate.baseUrl),
         maxBytes: osBaseUrlMaxBytes,
       },
-      {
-        tag: fieldProjectId,
-        name: "project id",
-        value: configuration.iterate.projectId,
-        maxBytes: projectIdMaxBytes,
-        /* The project's minted id (`prj_<hex>`), held to the charset every projectId is
-         * (`PROJECT_ID` in iterate's core/os/src/context/paths.ts), as `configuration.c` holds it. */
-        validate: (value) => /^[A-Za-z0-9_-]+$/.test(value),
-      },
-      {
-        tag: fieldProjectApiKey,
-        name: "project API key",
-        value: configuration.iterate.projectApiKey,
-        maxBytes: projectApiKeyMaxBytes,
-      },
+      ...credentialFields(configuration.iterate),
       {
         tag: fieldStatusVoice,
         name: "status voice",
@@ -167,6 +175,42 @@ export function encodeDeviceConfiguration(
   header.setUint32(12, crc32(payload), true);
   image.set(payload, CONFIG_HEADER_BYTES);
   return image;
+}
+
+function credentialFields(credential: ProjectCredential | MindCredential): ConfigurationField[] {
+  if (isMindCredential(credential))
+    return [
+      {
+        tag: fieldOauthClientId,
+        name: "OAuth client id",
+        value: credential.clientId,
+        maxBytes: oauthClientIdMaxBytes,
+        validate: (value) => /^https?:\/\/\S+$/.test(value),
+      },
+      {
+        tag: fieldOauthRefreshToken,
+        name: "refresh token",
+        value: credential.refreshToken,
+        maxBytes: oauthTokenMaxBytes,
+      },
+    ];
+  return [
+    {
+      tag: fieldProjectId,
+      name: "project id",
+      value: credential.projectId,
+      maxBytes: projectIdMaxBytes,
+      /* The project's minted id (`prj_<hex>`), held to the charset every projectId is
+       * (`PROJECT_ID` in iterate's core/os/src/context/paths.ts), as `configuration.c` holds it. */
+      validate: (value) => /^[A-Za-z0-9_-]+$/.test(value),
+    },
+    {
+      tag: fieldProjectApiKey,
+      name: "project API key",
+      value: credential.projectApiKey,
+      maxBytes: projectApiKeyMaxBytes,
+    },
+  ];
 }
 
 /** One field on its way into the partition. */

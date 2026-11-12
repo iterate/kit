@@ -4,6 +4,7 @@
 #include "iterate/kit/configuration.h"
 #include "iterate/kit/itx_connection.h"
 #include "iterate/kit/itx_credential_retry.h"
+#include "iterate/kit/token_refresh.h"
 #include "iterate/kit/itx_outbox_sender.h"
 #include "iterate/kit/platforms/esp_tls_stream.h"
 #include "iterate/kit/spsc_ring.h"
@@ -279,8 +280,8 @@ struct iterate_kit_itx_transport {
    * is the one this handshake actually rode in on; the connection borrows the
    * pointer once at prepare().
    */
-  /* Authorization (the 128-byte key and its line) plus the three forensics lines. */
-  char websocket_headers[352];
+  /* Authorization (a 160-byte token and its line) plus the three forensics lines. */
+  char websocket_headers[384];
   uint8_t websocket_receive_storage[
       ITERATE_KIT_ESP_IDF_CONTROL_MESSAGE_CAPACITY];
   uint8_t websocket_transmit_storage[
@@ -351,6 +352,21 @@ struct iterate_kit_itx_transport {
   uint32_t websocket_errors;
   /* Driven by the network task; metrics samples its refusal facts. */
   struct iterate_kit_itx_credential_retry credential_retry;
+  /*
+   * A MIND BOARD'S CREDENTIAL (token_refresh.h), the network task's alone.
+   * The access token rides the upgrade; the refresh token is the newest the
+   * issuer gave, kept in NVS by provisioning.h. The exchange borrows the
+   * WebSocket's receive storage, idle while no socket is open.
+   */
+  struct iterate_kit_token_refresh token_refresh;
+  struct iterate_kit_tokens tokens;
+  char refresh_token[ITERATE_KIT_OAUTH_TOKEN_CAPACITY];
+  char oauth_resource[ITERATE_KIT_OS_BASE_URL_CAPACITY + 4];
+  /* When the access token stops being used for a new upgrade (0: none). */
+  int64_t access_token_renew_at_us;
+  /* Exchanges that gave a token, and those that failed or were refused. */
+  uint32_t token_refreshes;
+  uint32_t token_refresh_failures;
   uint32_t mount_timeouts;
   uint32_t mount_timeout_generation;
   uint32_t protocol_failures;

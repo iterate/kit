@@ -1,4 +1,5 @@
 #include "iterate/kit/platforms/itx_transport.h"
+#include "iterate/kit/platforms/provisioning.h"
 
 #include "iterate/kit/atomic.h"
 #include "iterate/kit/voice_device_profile.h"
@@ -233,6 +234,107 @@ static void timeout_open_attempt(
   iterate_kit_retry_gate_defer(&transport->websocket_retry, now_us);
 }
 
+static bool mind_board(const struct iterate_kit_itx_transport *transport) {
+  return transport->options.configuration->platform ==
+      ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
+}
+
+/* As on the ESP transport: renew a token with less than this left. */
+enum { ACCESS_TOKEN_RENEW_MARGIN_S = 600 };
+
+static bool write_headers(struct iterate_kit_itx_transport *transport) {
+  const int length = snprintf(
+      transport->websocket_headers,
+      sizeof(transport->websocket_headers),
+      "Authorization: Bearer %s\r\n",
+      mind_board(transport) ? transport->tokens.access_token
+                            : transport->options.configuration->project_api_key);
+  return length > 0 && (size_t)length < sizeof(transport->websocket_headers);
+}
+
+static void end_token_refresh(
+    struct iterate_kit_itx_transport *transport,
+    enum iterate_kit_token_refresh_result result,
+    int64_t now_us) {
+  iterate_kit_token_refresh_close(&transport->token_refresh);
+  transport->token_refresh_active = false;
+  if (result != ITERATE_KIT_TOKEN_REFRESH_DONE) {
+    memset(&transport->tokens, 0, sizeof(transport->tokens));
+    transport->access_token_renew_at_us = 0;
+    increment(&transport->token_refresh_failures);
+    if (result == ITERATE_KIT_TOKEN_REFRESH_REFUSED) {
+      (void)fprintf(stderr,
+                    "transport: the mind's issuer refused this board's grant (HTTP %d); "
+                    "set the board up again\n",
+                    (int)transport->token_refresh.last_http_status);
+      (void)iterate_kit_itx_credential_retry_upgrade_failed(
+          &transport->credential_retry, 401, now_us);
+    } else {
+      (void)fprintf(stderr, "transport: token refresh failed (HTTP %d); retrying\n",
+                    (int)transport->token_refresh.last_http_status);
+      iterate_kit_retry_gate_defer(&transport->websocket_retry, now_us);
+    }
+    return;
+  }
+  if (strcmp(transport->tokens.refresh_token, transport->refresh_token) != 0) {
+    (void)snprintf(transport->refresh_token, sizeof(transport->refresh_token), "%s",
+                   transport->tokens.refresh_token);
+    if (!iterate_kit_platform_refresh_token_store(
+            transport->options.configuration, transport->refresh_token))
+      (void)fprintf(stderr, "transport: could not keep the rotated refresh token\n");
+  }
+  memset(transport->tokens.refresh_token, 0, sizeof(transport->tokens.refresh_token));
+  {
+    const uint32_t expires = transport->tokens.expires_in_s;
+    const uint32_t usable_s = expires > 2U * ACCESS_TOKEN_RENEW_MARGIN_S
+                                  ? expires - ACCESS_TOKEN_RENEW_MARGIN_S
+                                  : expires / 2U;
+    transport->access_token_renew_at_us = now_us + (int64_t)usable_s * 1000000;
+  }
+  increment(&transport->token_refreshes);
+  (void)fprintf(stderr, "transport: access token renewed for %us\n",
+                (unsigned)transport->tokens.expires_in_s);
+  (void)write_headers(transport);
+}
+
+/*
+ * A MIND BOARD'S TOKEN BEFORE ITS UPGRADE. True while the exchange runs (or
+ * failed this poll): the upgrade waits for a fresh access token.
+ */
+static bool renewing_access_token(
+    struct iterate_kit_itx_transport *transport, int64_t now_us) {
+  enum iterate_kit_token_refresh_result result;
+  if (!mind_board(transport)) return false;
+  if (!transport->token_refresh_active) {
+    if (transport->tokens.access_token[0] != '\0' &&
+        now_us < transport->access_token_renew_at_us)
+      return false;
+    result = iterate_kit_token_refresh_begin(
+        &transport->token_refresh,
+        &iterate_kit_posix_tls_stream_ops,
+        &transport->stream,
+        &transport->websocket.endpoint,
+        transport->options.configuration->oauth_client_id,
+        transport->refresh_token,
+        transport->oauth_resource,
+        transport->websocket_receive_storage,
+        sizeof(transport->websocket_receive_storage));
+    if (result != ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK) {
+      end_token_refresh(transport, result, now_us);
+      return true;
+    }
+    transport->token_refresh_active = true;
+    transport->token_refresh_deadline_us =
+        now_us + (int64_t)ITERATE_KIT_VOICE_CONNECTION_OPEN_TIMEOUT_MS * 1000;
+  }
+  result = iterate_kit_token_refresh_step(&transport->token_refresh, &transport->tokens);
+  if (result == ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK &&
+      transport_now_us(transport) >= transport->token_refresh_deadline_us)
+    result = ITERATE_KIT_TOKEN_REFRESH_FAILED;
+  if (result != ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK) end_token_refresh(transport, result, now_us);
+  return true;
+}
+
 static void drive_socket(
     struct iterate_kit_itx_transport *transport,
     int64_t now_us) {
@@ -253,6 +355,10 @@ static void drive_socket(
             &transport->websocket_retry, now_us) ||
         !iterate_kit_itx_credential_retry_ready(
             &transport->credential_retry, now_us)) {
+      return;
+    }
+    if (!transport->websocket_open_attempt_active &&
+        renewing_access_token(transport, now_us)) {
       return;
     }
     if (!transport->websocket_open_attempt_active) {
@@ -278,6 +384,13 @@ static void drive_socket(
     }
     if (result == ITERATE_KIT_WEBSOCKET_OPEN_FAILED) {
       transport->last_platform_error = websocket_error(transport);
+      if (mind_board(transport) &&
+          (transport->websocket.last_upgrade_status == 401 ||
+           transport->websocket.last_upgrade_status == 403)) {
+        /* the access token was refused: the next try renews it first */
+        memset(&transport->tokens, 0, sizeof(transport->tokens));
+        transport->access_token_renew_at_us = 0;
+      }
       if (iterate_kit_itx_credential_retry_upgrade_failed(
               &transport->credential_retry,
               transport->websocket.last_upgrade_status,
@@ -477,13 +590,21 @@ enum iterate_kit_status iterate_kit_itx_transport_prepare(
   }
   /*
    * The OS gates `/api` with its OAuth provider: the key rides the upgrade,
-   * resolved before the first Cap'n Web frame exists.
+   * resolved before the first Cap'n Web frame exists. A mind board's access
+   * token is written once each refresh gives one (renewing_access_token).
    */
-  headers_length = snprintf(
-      transport->websocket_headers,
-      sizeof(transport->websocket_headers),
-      "Authorization: Bearer %s\r\n",
-      options->configuration->project_api_key);
+  if (mind_board(transport)) {
+    if (iterate_kit_token_refresh_resource(
+            options->configuration->os_base_url,
+            transport->oauth_resource,
+            sizeof(transport->oauth_resource)) != ITERATE_KIT_CONFIGURATION_OK) {
+      memset(transport, 0, sizeof(*transport));
+      return ITERATE_KIT_INVALID_ARGUMENT;
+    }
+    iterate_kit_platform_refresh_token_load(
+        options->configuration, transport->refresh_token, sizeof(transport->refresh_token));
+  }
+  headers_length = write_headers(transport) ? 1 : -1;
   websocket_options = (struct iterate_kit_websocket_client_options){
     .url = transport->websocket_url,
     .headers = transport->websocket_headers,

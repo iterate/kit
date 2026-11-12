@@ -31,7 +31,9 @@ static void decodes_the_typescript_golden_image(void) {
       "https://os.iterate2.com") == 0);
   assert(strcmp(configuration.project_id, "prj_voice_lab") == 0);
   assert(strcmp(configuration.project_api_key, "itxk_secret") == 0);
-  assert(sizeof(configuration) <= 424U);
+  assert(configuration.platform == ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT);
+  /* 424 bytes before the mind fields; they add a client id and a token. */
+  assert(sizeof(configuration) <= 784U);
 }
 
 /*
@@ -218,7 +220,83 @@ static void decodes_the_status_voice_and_defaults_what_it_does_not_know(void) {
   assert(strcmp(configuration.project_api_key, "itxk_secret") == 0);
 }
 
+static void decodes_the_typescript_mind_image(void) {
+  struct iterate_kit_configuration configuration;
+  assert(iterate_kit_configuration_decode(
+      &configuration,
+      iterate_kit_test_mind_configuration_image,
+      sizeof(iterate_kit_test_mind_configuration_image)) ==
+      ITERATE_KIT_CONFIGURATION_OK);
+  assert(configuration.platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND);
+  assert(strcmp(configuration.os_base_url, "https://iterate.example.com") == 0);
+  assert(strcmp(
+      configuration.oauth_client_id,
+      "https://k.iterate.com/devices/mac/clients/"
+      "00000000-0000-4000-8000-000000000000.json") == 0);
+  assert(strcmp(configuration.oauth_refresh_token, "user_1:grant_1:secret") == 0);
+  assert(configuration.project_id[0] == '\0');
+  assert(configuration.project_api_key[0] == '\0');
+  assert(configuration.status_voice == ITERATE_KIT_STATUS_VOICE_SPOKEN);
+}
+
+/* Appends one TLV field and fixes the header's size and CRC. */
+static size_t append_field(uint8_t *image, size_t size, uint8_t tag, const char *value) {
+  const size_t length = strlen(value);
+  uint32_t payload;
+  uint32_t crc = UINT32_C(0xffffffff);
+  image[size] = tag;
+  image[size + 1U] = (uint8_t)(length & 0xffU);
+  image[size + 2U] = (uint8_t)(length >> 8U);
+  memcpy(image + size + 3U, value, length);
+  size += 3U + length;
+  payload = (uint32_t)(size - ITERATE_KIT_CONFIGURATION_HEADER_SIZE);
+  image[8] = (uint8_t)payload;
+  image[9] = (uint8_t)(payload >> 8U);
+  image[10] = (uint8_t)(payload >> 16U);
+  image[11] = (uint8_t)(payload >> 24U);
+  for (size_t index = ITERATE_KIT_CONFIGURATION_HEADER_SIZE; index < size; ++index) {
+    crc ^= image[index];
+    for (int bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1U) ^ ((crc & 1U) != 0U ? UINT32_C(0xedb88320) : 0U);
+  }
+  crc ^= UINT32_C(0xffffffff);
+  image[12] = (uint8_t)crc;
+  image[13] = (uint8_t)(crc >> 8U);
+  image[14] = (uint8_t)(crc >> 16U);
+  image[15] = (uint8_t)(crc >> 24U);
+  return size;
+}
+
+/*
+ * ONE PLATFORM, WHOLE: a project's key beside a mind's refresh token would
+ * leave the board to guess which credential to present, and half a mind
+ * credential is a board that can never sign in.
+ */
+static void refuses_mixed_or_half_credentials(void) {
+  uint8_t image[1024];
+  struct iterate_kit_configuration configuration;
+  size_t size = sizeof(iterate_kit_test_configuration_image);
+  memcpy(image, iterate_kit_test_configuration_image, size);
+  size = append_field(image, size, 8, "user_1:grant_1:secret");
+  assert(iterate_kit_configuration_decode(&configuration, image, size) ==
+         ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+
+  memcpy(image, iterate_kit_test_mind_configuration_image,
+         sizeof(iterate_kit_test_mind_configuration_image));
+  /* the same image less its last two fields (refresh token, status voice) */
+  size = ITERATE_KIT_CONFIGURATION_HEADER_SIZE;
+  size = append_field(image, size, 1, "studio");
+  size = append_field(image, size, 2, "");
+  size = append_field(image, size, 3, "https://iterate.example.com");
+  size = append_field(image, size, 7, "https://k.iterate.com/devices/mac/clients/x.json");
+  assert(iterate_kit_configuration_decode(&configuration, image, size) ==
+         ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+  assert(configuration.oauth_client_id[0] == '\0');
+}
+
 int main(void) {
+  decodes_the_typescript_mind_image();
+  refuses_mixed_or_half_credentials();
   decodes_the_typescript_golden_image();
   decodes_the_status_voice_and_defaults_what_it_does_not_know();
   decodes_the_flashed_image_with_an_unprefixed_project_and_a_full_length_key();

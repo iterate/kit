@@ -1,4 +1,5 @@
 #include "iterate/kit/platforms/itx_transport.h"
+#include "iterate/kit/platforms/provisioning.h"
 #include "iterate/kit/platforms/system_update.h"
 #include "iterate/kit/atomic.h"
 #include "iterate/kit/retry_gate.h"
@@ -674,6 +675,89 @@ static void send_control_messages(
  * this handshake's, not boot's. Failure here must never block dialing — a
  * blank header beats no socket.
  */
+static bool mind_board(const struct iterate_kit_itx_transport *transport) {
+  return transport->options.configuration->platform ==
+      ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
+}
+
+enum {
+  /*
+   * A token with less than this left is renewed before an upgrade, so a
+   * connection rarely outlives the token it rode: a mind ends the session
+   * when its token ends.
+   */
+  ACCESS_TOKEN_RENEW_MARGIN_S = 600,
+};
+
+static bool access_token_fresh(
+    const struct iterate_kit_itx_transport *transport, int64_t now_us) {
+  return transport->tokens.access_token[0] != '\0' &&
+      now_us < transport->access_token_renew_at_us;
+}
+
+/*
+ * ONE REFRESH, BOUNDED LIKE AN OPEN (token_refresh.h). It runs on the network
+ * task while no socket is open, over the same stream to the same host, with
+ * the WebSocket's idle receive storage for the answer. The rotated refresh
+ * token is kept before it is used, so a restart finds it.
+ */
+static enum iterate_kit_token_refresh_result refresh_access_token(
+    struct iterate_kit_itx_transport *transport) {
+  const int64_t deadline_us =
+      esp_timer_get_time() + (int64_t)WEBSOCKET_CONNECT_TIMEOUT_MS * 1000;
+  enum iterate_kit_token_refresh_result result =
+      iterate_kit_token_refresh_begin(
+          &transport->token_refresh,
+          &iterate_kit_esp_tls_stream_ops,
+          &transport->stream,
+          &transport->websocket.endpoint,
+          transport->options.configuration->oauth_client_id,
+          transport->refresh_token,
+          transport->oauth_resource,
+          transport->websocket_receive_storage,
+          sizeof(transport->websocket_receive_storage));
+  while (result == ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK) {
+    result = iterate_kit_token_refresh_step(
+        &transport->token_refresh, &transport->tokens);
+    if (result != ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK) break;
+    if (esp_timer_get_time() >= deadline_us) {
+      result = ITERATE_KIT_TOKEN_REFRESH_FAILED;
+      break;
+    }
+    vTaskDelay(1);
+  }
+  iterate_kit_token_refresh_close(&transport->token_refresh);
+  if (result != ITERATE_KIT_TOKEN_REFRESH_DONE) {
+    memset(&transport->tokens, 0, sizeof(transport->tokens));
+    transport->access_token_renew_at_us = 0;
+    iterate_kit_atomic_saturating_increment_relaxed_u32(
+        &transport->token_refresh_failures);
+    return result;
+  }
+  if (strcmp(transport->tokens.refresh_token, transport->refresh_token) != 0) {
+    (void)snprintf(
+        transport->refresh_token,
+        sizeof(transport->refresh_token),
+        "%s",
+        transport->tokens.refresh_token);
+    (void)iterate_kit_platform_refresh_token_store(
+        transport->options.configuration, transport->refresh_token);
+  }
+  memset(transport->tokens.refresh_token, 0,
+         sizeof(transport->tokens.refresh_token));
+  {
+    const uint32_t usable_s =
+        transport->tokens.expires_in_s > 2U * ACCESS_TOKEN_RENEW_MARGIN_S
+            ? transport->tokens.expires_in_s - ACCESS_TOKEN_RENEW_MARGIN_S
+            : transport->tokens.expires_in_s / 2U;
+    transport->access_token_renew_at_us =
+        esp_timer_get_time() + (int64_t)usable_s * 1000000;
+  }
+  iterate_kit_atomic_saturating_increment_relaxed_u32(
+      &transport->token_refreshes);
+  return result;
+}
+
 static void refresh_handshake_headers(
     struct iterate_kit_itx_transport *transport) {
   uint8_t mac[6] = {0};
@@ -690,7 +774,8 @@ static void refresh_handshake_headers(
       "X-Iterate-Mac: %02x:%02x:%02x:%02x:%02x:%02x\r\n"
       "X-Iterate-Fw: %s\r\n"
       "X-Wifi-Rssi: %d\r\n",
-      transport->options.configuration->project_api_key,
+      mind_board(transport) ? transport->tokens.access_token
+                            : transport->options.configuration->project_api_key,
       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
       esp_app_get_description()->version,
       rssi);
@@ -881,6 +966,24 @@ static void network_task(void *context) {
             ITERATE_KIT_ITX_FATAL_NETWORK_STACK_HEADROOM);
         continue;
       }
+      if (mind_board(transport) && !access_token_fresh(transport, now_us)) {
+        /*
+         * The exchange is this pass's one blocking step; the upgrade waits for
+         * the next pass, so a pass never holds two connect bounds against the
+         * watchdog. A refused grant backs off on the credential gate, as a
+         * refused key does: setting the board up again is what mends it.
+         */
+        const enum iterate_kit_token_refresh_result refreshed =
+            refresh_access_token(transport);
+        now_us = esp_timer_get_time();
+        if (refreshed == ITERATE_KIT_TOKEN_REFRESH_REFUSED) {
+          (void)iterate_kit_itx_credential_retry_upgrade_failed(
+              &transport->credential_retry, 401, now_us);
+        } else if (refreshed != ITERATE_KIT_TOKEN_REFRESH_DONE) {
+          iterate_kit_retry_gate_defer(&websocket_retry, now_us);
+        }
+        continue;
+      }
       iterate_kit_atomic_saturating_increment_relaxed_u32(
           &transport->websocket_start_attempts);
       refresh_handshake_headers(transport);
@@ -916,6 +1019,13 @@ static void network_task(void *context) {
               &transport->credential_retry,
               transport->websocket.last_upgrade_status,
               now_us);
+          if (mind_board(transport) &&
+              (transport->websocket.last_upgrade_status == 401 ||
+               transport->websocket.last_upgrade_status == 403)) {
+            /* the access token was refused: the next try renews it first */
+            memset(&transport->tokens, 0, sizeof(transport->tokens));
+            transport->access_token_renew_at_us = 0;
+          }
         }
         iterate_kit_websocket_client_close(&transport->websocket);
       }
@@ -994,6 +1104,21 @@ enum iterate_kit_status iterate_kit_itx_transport_prepare(
     return ITERATE_KIT_INVALID_ARGUMENT;
   }
   transport->options = *options;
+  if (options->configuration->platform ==
+      ITERATE_KIT_CONFIGURATION_PLATFORM_MIND) {
+    if (iterate_kit_token_refresh_resource(
+            options->configuration->os_base_url,
+            transport->oauth_resource,
+            sizeof(transport->oauth_resource)) !=
+        ITERATE_KIT_CONFIGURATION_OK) {
+      memset(transport, 0, sizeof(*transport));
+      return ITERATE_KIT_INVALID_ARGUMENT;
+    }
+    iterate_kit_platform_refresh_token_load(
+        options->configuration,
+        transport->refresh_token,
+        sizeof(transport->refresh_token));
+  }
   /*
    * The fragment adapters wrap caller-owned SPSC rings; they allocate nothing.
    * Initializing both before publishing `initialized` prevents callbacks or a

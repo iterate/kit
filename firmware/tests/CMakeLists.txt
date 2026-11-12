@@ -83,6 +83,7 @@ iterate_kit_add_core_test(
 iterate_kit_add_core_test(iterate-kit-microphone-flush-test microphone_flush_test.c)
 
 iterate_kit_add_core_test(iterate-kit-retry-gate-test retry_gate_test.c)
+iterate_kit_add_core_test(iterate-kit-token-refresh-test token_refresh_test.c)
 # The one session grammar every board drives: a press starts a session
 # (with the wake chime), a press or an end-press ends it, and leaving a
 # session is the one end-chime edge. Board tests keep only their gesture wiring.

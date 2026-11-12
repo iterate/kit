@@ -19,7 +19,8 @@ idf_component_register(
     esp_timer
     esp_wifi
     lwip
-    mbedtls)
+    mbedtls
+    nvs_flash)
 
 target_compile_features(${COMPONENT_LIB} PUBLIC c_std_99)
 target_compile_options(${COMPONENT_LIB} PRIVATE

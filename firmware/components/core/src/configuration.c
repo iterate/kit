@@ -12,9 +12,10 @@
  * the caller's perspective: every failure clears the entire destination.
  *
  * CRC32 detects transfer/storage corruption; it is not a MAC and does not make
- * the key safe against someone who can read or rewrite flash. The key field
- * carries a project-scoped personal access token minted by `grants.mint` for
- * the person who set the board up (itx_mount.h).
+ * the key safe against someone who can read or rewrite flash. On the old
+ * platform the key field carries a project-scoped personal access token minted
+ * by `grants.mint` for the person who set the board up (itx_mount.h); on a
+ * mind, a refresh token of that person's grant (configuration.h).
  */
 enum {
   CONFIGURATION_FIELD_HEADER_SIZE = 3,
@@ -24,6 +25,8 @@ enum {
   CONFIGURATION_FIELD_PROJECT_ID = 4,
   CONFIGURATION_FIELD_PROJECT_API_KEY = 5,
   CONFIGURATION_FIELD_STATUS_VOICE = 6,
+  CONFIGURATION_FIELD_OAUTH_CLIENT_ID = 7,
+  CONFIGURATION_FIELD_OAUTH_REFRESH_TOKEN = 8,
 };
 
 /* Indexed by enum iterate_kit_status_voice; Kit's encoder (src/firmware/config-image.ts) writes these. */
@@ -275,9 +278,13 @@ enum iterate_kit_configuration_error iterate_kit_configuration_decode(
   const uint32_t required_fields =
       (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_SSID) |
       (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_PASSWORD) |
-      (UINT32_C(1) << CONFIGURATION_FIELD_OS_BASE_URL) |
+      (UINT32_C(1) << CONFIGURATION_FIELD_OS_BASE_URL);
+  const uint32_t project_fields =
       (UINT32_C(1) << CONFIGURATION_FIELD_PROJECT_ID) |
       (UINT32_C(1) << CONFIGURATION_FIELD_PROJECT_API_KEY);
+  const uint32_t mind_fields =
+      (UINT32_C(1) << CONFIGURATION_FIELD_OAUTH_CLIENT_ID) |
+      (UINT32_C(1) << CONFIGURATION_FIELD_OAUTH_REFRESH_TOKEN);
 
   if (configuration == NULL || image == NULL) {
     return fail(
@@ -372,6 +379,14 @@ enum iterate_kit_configuration_error iterate_kit_configuration_decode(
         destination = configuration->project_api_key;
         capacity = sizeof(configuration->project_api_key);
         break;
+      case CONFIGURATION_FIELD_OAUTH_CLIENT_ID:
+        destination = configuration->oauth_client_id;
+        capacity = sizeof(configuration->oauth_client_id);
+        break;
+      case CONFIGURATION_FIELD_OAUTH_REFRESH_TOKEN:
+        destination = configuration->oauth_refresh_token;
+        capacity = sizeof(configuration->oauth_refresh_token);
+        break;
       case CONFIGURATION_FIELD_STATUS_VOICE:
         break;
       default:
@@ -406,8 +421,29 @@ enum iterate_kit_configuration_error iterate_kit_configuration_decode(
         configuration,
         ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
   }
+  /*
+   * ONE PLATFORM, WHOLE. A half set is a missing field; both sets would leave
+   * the board to guess which credential the image meant, so that is refused.
+   */
+  if ((seen_fields & project_fields) != 0U &&
+      (seen_fields & mind_fields) != 0U) {
+    return fail(
+        configuration,
+        ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+  }
+  if ((seen_fields & mind_fields) == mind_fields) {
+    configuration->platform = ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
+  } else if ((seen_fields & project_fields) == project_fields) {
+    configuration->platform = ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT;
+  } else {
+    return fail(
+        configuration,
+        ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+  }
   if (!valid_base_url(configuration->os_base_url) ||
-      !valid_project_id(configuration->project_id)) {
+      (configuration->platform ==
+           ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT &&
+       !valid_project_id(configuration->project_id))) {
     return fail(
         configuration,
         ITERATE_KIT_CONFIGURATION_INVALID_VALUE);

@@ -75,9 +75,21 @@ struct iterate_kit_itx_mount_options {
    */
   const char *capability_match;
   struct capnweb_capability capability;
+  /**
+   * A MIND'S SESSION (iterate/core). The upgrade's bearer already made the
+   * session's main import the mind's root context, so the mount makes ONE
+   * call, `provide`, on it, and the liveness probe asks the same root's
+   * `whoami()`. `project_id` and `project_api_key` are unused. False: the old
+   * platform's three calls below.
+   */
+  bool mind;
 };
 
 /**
+ * On a MIND (`options.mind`) only the third call is made, on the session's
+ * main import, which already IS the mind's root context; the mount owns no
+ * session or project import then, and the main import is never released.
+ *
  * One live Cap'n Web session's addressing of an OS project, plus the one
  * act that lends this device back to it.
  *
