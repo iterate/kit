@@ -57,3 +57,41 @@ jobs:
         run: bash scripts/ci/toolchain.sh start && bash scripts/ci/toolchain.sh wait
       - name: Run the firmware host tests
         run: pnpm firmware:test:host
+
+  firmware-qemu-boot:
+    name: Firmware boots in QEMU
+    # A board's firmware, built for QEMU's console, boots in Espressif's QEMU to app_main
+    # (scripts/ci/qemu-boot.sh says what it proves and what QEMU does not have).
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Setup Node
+        run: bash scripts/ci/toolchain.sh node
+      # ESP-IDF from Depot Cache, as kit-firmware.yml's builds take it; only those save it.
+      - name: ESP-IDF's key
+        id: esp-idf-key
+        run: scripts/ci/esp-idf.sh key >>"$GITHUB_OUTPUT"
+      - name: Restore ESP-IDF
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path: |
+            /home/runner/esp-idf
+            /home/runner/.espressif
+          key: ${{ steps.esp-idf-key.outputs.key }}
+      - name: ESP-IDF
+        run: scripts/ci/esp-idf.sh ensure
+      # QEMU's own libraries; the stock image may lack them.
+      - name: QEMU's libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgcrypt20 libpixman-1-0 libsdl2-2.0-0 libslirp0
+      - name: Boot the voice board in QEMU
+        run: |-
+          set -euo pipefail
+          source "$IDF_PATH/export.sh"
+          scripts/ci/qemu-boot.sh havpe
