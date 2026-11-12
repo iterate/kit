@@ -113,7 +113,8 @@ export async function startMindSignIn(input: {
   storage: Storage;
   fetcher: typeof fetch;
 }): Promise<string> {
-  const { platformOrigin, metadata } = await discoverMind(input.address, input.fetcher);
+  const { fetcher } = input;
+  const { platformOrigin, metadata } = await discoverMind(input.address, fetcher);
   const { clientId, redirectUri } = mindClientOf(input.device, input.kitOrigin);
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const challenge = base64url(
@@ -157,7 +158,9 @@ export async function finishMindSignIn(input: {
   const pending = saved ? (JSON.parse(saved) as PendingSignIn) : null;
   if (!pending || pending.state !== input.state)
     throw new Error("This sign-in did not start on this page. Start again.");
-  const response = await input.fetcher(pending.tokenEndpoint, {
+  // called bare, never as `input.fetcher(...)`: the browser's fetch refuses any `this` but window
+  const { fetcher } = input;
+  const response = await fetcher(pending.tokenEndpoint, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
     body: new URLSearchParams({

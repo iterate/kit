@@ -117,3 +117,34 @@ test("a sign-in: the authorize URL carries PKCE and the board's own client, and 
     }),
   ).rejects.toThrow("did not start on this page");
 });
+
+/** The browser's fetch throws "Illegal invocation" when called with any `this` but window. */
+function bareOnly(answer: () => Response): typeof fetch {
+  return function (this: unknown) {
+    if (this !== undefined) throw new TypeError("Illegal invocation");
+    return Promise.resolve(answer());
+  } as unknown as typeof fetch;
+}
+
+test("a sign-in calls fetch bare, as the browser's fetch requires", async () => {
+  const storage = memoryStorage();
+  const origin = "https://iterate.example.com";
+  const authorize = new URL(
+    await startMindSignIn({
+      device,
+      address: "example.com",
+      kitOrigin: "https://k.iterate.com",
+      storage,
+      fetcher: bareOnly(() => Response.json(metadata(origin))),
+    }),
+  );
+  await expect(
+    finishMindSignIn({
+      device,
+      code: "c",
+      state: authorize.searchParams.get("state")!,
+      storage,
+      fetcher: bareOnly(() => Response.json({ refresh_token: "user_1:grant_1:r" })),
+    }),
+  ).resolves.toMatchObject({ refreshToken: "user_1:grant_1:r" });
+});
