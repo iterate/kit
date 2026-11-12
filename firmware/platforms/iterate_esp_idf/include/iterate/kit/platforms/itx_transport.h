@@ -364,6 +364,8 @@ struct iterate_kit_itx_transport {
   char oauth_resource[ITERATE_KIT_OS_BASE_URL_CAPACITY + 4];
   /* When the access token stops being used for a new upgrade (0: none). */
   int64_t access_token_renew_at_us;
+  /* The same, in esp_timer seconds, for the loop task to read (atomic). */
+  uint32_t access_token_renew_at_s;
   /* Exchanges that gave a token, and those that failed or were refused. */
   uint32_t token_refreshes;
   uint32_t token_refresh_failures;
@@ -454,6 +456,16 @@ enum iterate_kit_status iterate_kit_itx_transport_poll(
  */
 void iterate_kit_itx_transport_request_restart(
     struct iterate_kit_itx_transport *transport);
+
+/**
+ * A MIND BOARD'S TOKEN IS DUE FOR RENEWAL: the access token the live session
+ * rode is within its last ten minutes. A mind ends a session when its token
+ * ends, so the loop replaces the socket while no call is live
+ * (request_restart), and the next upgrade renews the token first. Always
+ * false on the old platform, whose key has no expiry. Safe from any task.
+ */
+bool iterate_kit_itx_transport_credential_renewal_due(
+    const struct iterate_kit_itx_transport *transport);
 
 
 /**

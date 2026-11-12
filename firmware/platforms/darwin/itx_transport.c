@@ -718,6 +718,13 @@ enum iterate_kit_status iterate_kit_itx_transport_poll(
   return ITERATE_KIT_OK;
 }
 
+bool iterate_kit_itx_transport_credential_renewal_due(
+    const struct iterate_kit_itx_transport *transport) {
+  return transport != NULL && transport->initialized && mind_board(transport) &&
+      transport->access_token_renew_at_us != 0 &&
+      transport_now_us(transport) >= transport->access_token_renew_at_us;
+}
+
 void iterate_kit_itx_transport_request_restart(
     struct iterate_kit_itx_transport *transport) {
   if (transport != NULL && transport->initialized) {

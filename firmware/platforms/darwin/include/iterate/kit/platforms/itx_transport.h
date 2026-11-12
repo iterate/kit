@@ -194,6 +194,16 @@ enum capnweb_status iterate_kit_itx_transport_send_text(
 void iterate_kit_itx_transport_request_restart(
     struct iterate_kit_itx_transport *transport);
 
+/**
+ * A MIND BOARD'S TOKEN IS DUE FOR RENEWAL: the access token the live session
+ * rode is within its last ten minutes. A mind ends a session when its token
+ * ends, so the loop replaces the socket while no call is live
+ * (request_restart), and the next upgrade renews the token first. Always
+ * false on the old platform, whose key has no expiry. Safe from any task.
+ */
+bool iterate_kit_itx_transport_credential_renewal_due(
+    const struct iterate_kit_itx_transport *transport);
+
 enum iterate_kit_status iterate_kit_itx_transport_stop(
     struct iterate_kit_itx_transport *transport);
 

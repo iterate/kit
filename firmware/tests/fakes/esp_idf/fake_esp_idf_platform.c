@@ -306,6 +306,12 @@ enum iterate_kit_status iterate_kit_itx_transport_poll(
   return ITERATE_KIT_OK;
 }
 
+bool iterate_kit_itx_transport_credential_renewal_due(
+    const struct iterate_kit_itx_transport *transport) {
+  (void)transport;
+  return false;
+}
+
 void iterate_kit_itx_transport_request_restart(
     struct iterate_kit_itx_transport *transport) {
   if (transport == NULL) return;

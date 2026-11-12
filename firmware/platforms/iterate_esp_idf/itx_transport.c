@@ -730,6 +730,7 @@ static enum iterate_kit_token_refresh_result refresh_access_token(
   if (result != ITERATE_KIT_TOKEN_REFRESH_DONE) {
     memset(&transport->tokens, 0, sizeof(transport->tokens));
     transport->access_token_renew_at_us = 0;
+    atomic_store_u32(&transport->access_token_renew_at_s, 0U);
     iterate_kit_atomic_saturating_increment_relaxed_u32(
         &transport->token_refresh_failures);
     return result;
@@ -752,6 +753,9 @@ static enum iterate_kit_token_refresh_result refresh_access_token(
             : transport->tokens.expires_in_s / 2U;
     transport->access_token_renew_at_us =
         esp_timer_get_time() + (int64_t)usable_s * 1000000;
+    atomic_store_u32(
+        &transport->access_token_renew_at_s,
+        (uint32_t)(transport->access_token_renew_at_us / 1000000) + 1U);
   }
   iterate_kit_atomic_saturating_increment_relaxed_u32(
       &transport->token_refreshes);
@@ -1662,6 +1666,19 @@ enum iterate_kit_status iterate_kit_itx_transport_poll(
       transport,
       ITERATE_KIT_ITX_FATAL_CONNECTION_STATE);
   return ITERATE_KIT_STATE_ERROR;
+}
+
+bool iterate_kit_itx_transport_credential_renewal_due(
+    const struct iterate_kit_itx_transport *transport) {
+  uint32_t renew_at_s;
+  if (transport == NULL || !transport->initialized ||
+      !mind_board(transport)) {
+    return false;
+  }
+  renew_at_s = __atomic_load_n(
+      &transport->access_token_renew_at_s, __ATOMIC_ACQUIRE);
+  return renew_at_s != 0U &&
+      (uint32_t)(esp_timer_get_time() / 1000000) >= renew_at_s;
 }
 
 void iterate_kit_itx_transport_request_restart(

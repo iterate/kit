@@ -3037,6 +3037,17 @@ void iterate_kit_voice_loop_step(void) {
       if (CONTROL_OUTBOX_SLOTS - probe_outbox.current_slots >= 3U) {
         (void)iterate_kit_itx_mount_probe_if_due(&runtime.connection.mount, now);
       }
+      /*
+       * A MIND ENDS A SESSION WHEN ITS TOKEN ENDS. Ten minutes before, while
+       * no call is live or wanted, the socket is replaced; the transport
+       * renews the token before the next upgrade, so a call is never cut by
+       * the hour (iterate/kit/token_refresh.h).
+       */
+      if (!runtime.view.wants_call && !runtime.view.call_active &&
+          iterate_kit_itx_transport_credential_renewal_due(&transport)) {
+        ESP_LOGI(tag, "access token due for renewal — replacing the socket while idle");
+        iterate_kit_itx_transport_request_restart(&transport);
+      }
       if (iterate_kit_itx_mount_abandon_overdue_probe(&runtime.connection.mount, now)) {
         if (runtime.heartbeat_restarts < UINT32_MAX) ++runtime.heartbeat_restarts;
         ESP_LOGW(
