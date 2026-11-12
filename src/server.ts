@@ -39,7 +39,13 @@ export default createServerEntry({
     // posthog-js's `api_host` (src/components/posthog.tsx): PostHog EU through our own origin
     if (url.pathname.startsWith("/e/")) return proxyPosthogRequest({ request, proxyPrefix: "/e" });
     // Firmware release files are public: esp-web-tools fetches them from the page (firmware-proxy.ts).
-    const firmware = await proxyFirmwareFile(request, fetch);
+    // GitHub answers 429 to Cloudflare's shared addresses at times, so each file GitHub served is
+    // kept in this zone's cache for a day: a version's files never change. Nothing else is kept.
+    const firmware = await proxyFirmwareFile(request, (url) =>
+      fetch(url, {
+        cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": 86_400, "300-599": 0 } },
+      }),
+    );
     if (firmware) return firmware;
     const own =
       deviceClientMetadata(url) ||
