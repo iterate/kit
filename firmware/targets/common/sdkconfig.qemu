@@ -1,0 +1,4 @@
+# The QEMU boot test's image (scripts/firmware-qemu.ts): the console on UART0, which QEMU shows,
+# and USB-Serial-JTAG as the second console, as on a board.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
