@@ -46,12 +46,18 @@ export function SetupWizard<Input extends SetupInput>({
 }) {
   const queryClient = useQueryClient();
   const flashing = useMutation({
-    mutationFn: (input: { configuration: DeviceConfiguration; erase: boolean; attempt: string }) =>
+    mutationFn: (input: {
+      configuration: DeviceConfiguration;
+      erase: boolean;
+      configurationOnly: boolean;
+      attempt: string;
+    }) =>
       flashDevice({
         manifest,
         device,
         configuration: input.configuration,
         erase: input.erase,
+        configurationOnly: input.configurationOnly,
         onProgress: (progress) =>
           queryClient.setQueryData(flashProgressKey(input.attempt), progress),
       }),
@@ -128,6 +134,7 @@ export function SetupWizard<Input extends SetupInput>({
                   flashing.mutate({
                     configuration: preparing.data,
                     erase: new FormData(event.currentTarget).has("erase"),
+                    configurationOnly: new FormData(event.currentTarget).has("configuration-only"),
                     attempt: crypto.randomUUID(),
                   });
                 }}
@@ -157,6 +164,19 @@ export function SetupWizard<Input extends SetupInput>({
                     <FieldDescription>
                       Clears what other firmware left behind, such as Home Assistant’s. Slower, and
                       recommended the first time.
+                    </FieldDescription>
+                  </FieldContent>
+                </Field>
+                <Field orientation="horizontal">
+                  <Checkbox id="configuration-only" name="configuration-only" />
+                  <FieldContent>
+                    <FieldLabel htmlFor="configuration-only">
+                      Only set it up again (keep its firmware)
+                    </FieldLabel>
+                    <FieldDescription>
+                      For a board that already runs {manifest.version}: writes the Wi-Fi and sign-in
+                      alone, in seconds, and never erases. Use it when the board says to set it up
+                      again.
                     </FieldDescription>
                   </FieldContent>
                 </Field>

@@ -170,6 +170,15 @@ test("prepareInstall: adds the install's configuration image to the release, unt
   await expect(nativeFetch(imageUrl)).rejects.toThrow();
 });
 
+test("prepareInstall: setting a board up again writes its configuration alone", async () => {
+  stubKitPage();
+  const manifest = await loadFirmwareManifest(release, serving(releaseManifest));
+  using install = prepareInstall(manifest, configuration, { configurationOnly: true });
+  expect(install.manifest.builds[0]!.parts).toEqual([
+    { path: expect.stringMatching(/^blob:/), offset: 0x9000 },
+  ]);
+});
+
 /** The page the loader runs on; the Kit vitest config unstubs it after each test. */
 function stubKitPage() {
   vi.stubGlobal("window", {

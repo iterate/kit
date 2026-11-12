@@ -61,7 +61,13 @@ export type FirmwareManifest = Awaited<ReturnType<typeof loadFirmwareManifest>>;
  * image is a blob URL, which `flash` downloads like any other part; disposing revokes it, once
  * flashing has finished with it.
  */
-export function prepareInstall(manifest: FirmwareManifest, configuration: DeviceConfiguration) {
+/** `configurationOnly`: write the install's configuration and nothing else, to set a board that
+ *  already runs this release up again (new Wi-Fi, or a new sign-in after its grant ended). */
+export function prepareInstall(
+  manifest: FirmwareManifest,
+  configuration: DeviceConfiguration,
+  { configurationOnly = false }: { configurationOnly?: boolean } = {},
+) {
   const configurationImage = URL.createObjectURL(
     new Blob([encodeDeviceConfiguration(configuration, manifest.configurationPartition.size)], {
       type: "application/octet-stream",
@@ -74,7 +80,7 @@ export function prepareInstall(manifest: FirmwareManifest, configuration: Device
       builds: manifest.builds.map((build) => ({
         ...build,
         parts: [
-          ...build.parts,
+          ...(configurationOnly ? [] : build.parts),
           { path: configurationImage, offset: manifest.configurationPartition.offset },
         ],
       })),

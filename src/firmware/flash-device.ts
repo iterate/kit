@@ -42,11 +42,16 @@ export async function flashDevice(input: {
   device: FirmwareDevice;
   configuration: DeviceConfiguration;
   erase: boolean;
+  /** Write the configuration alone (prepare-manifest.ts); never with `erase`, which would leave no
+   *  firmware. */
+  configurationOnly?: boolean;
   onProgress: (progress: FlashProgress) => void;
 }) {
   const port = await choosePort();
   const { flash } = await import("esp-web-tools/dist/flash.js");
-  using install = prepareInstall(input.manifest, input.configuration);
+  using install = prepareInstall(input.manifest, input.configuration, {
+    configurationOnly: input.configurationOnly,
+  });
   let failure: Error | undefined;
   try {
     await flash(
@@ -59,7 +64,7 @@ export async function flashDevice(input: {
       // only resolves relative part paths, and every path is absolute (prepare-manifest.ts)
       window.location.href,
       install.manifest as Manifest,
-      input.erase,
+      input.erase && !input.configurationOnly,
     );
   } catch (error) {
     // After an error event, `flash` resets the board and closes the port, which can throw too: the
