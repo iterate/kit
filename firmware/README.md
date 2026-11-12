@@ -220,6 +220,18 @@ board looking absent rather than offline. `$KIT_TOKEN` is a personal access
 token scoped to the project: from the Dash's Sessions page, or
 `pnpm exec iterate tokens create --name <board> --project <project> --never-expires`.
 
+A board for a MIND (iterate/core) carries, in place of the project id and key,
+the mind's platform origin (`https://iterate.<domain>`) as its base URL, an OAuth
+client id and a refresh token (`--client-id`, `--refresh-token-file`). An image
+names one platform whole; both, or half of one, is refused. Before each upgrade
+the transport trades the refresh token for an access token at the issuer's
+`/oauth2/token` (`components/core/include/iterate/kit/token_refresh.h`), keeps
+the rotated refresh token (NVS namespace `iterate_token` on a board, `<config>.token`
+on the Mac), and presents the access token as the upgrade's bearer. The session's
+main import is then the mind's root, so the mount makes one call, `provide`
+(`itx_mount.h`). A refused grant (400 or 401) backs off like a refused key and
+says "set me up again".
+
 At boot, firmware rejects a missing or invalid partition, joins Wi-Fi and
 mounts. Health classifies provisioning, Wi-Fi/authentication, mount and audio
 failures.

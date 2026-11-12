@@ -53,8 +53,9 @@ static bool valid_options(
     const struct iterate_kit_itx_mount_options *options) {
   return options != NULL &&
       options->session != NULL &&
-      nonempty(options->project_id) &&
-      nonempty(options->project_api_key) &&
+      (options->mind ||
+       (nonempty(options->project_id) &&
+        nonempty(options->project_api_key))) &&
       valid_capability_match(options->capability_match) &&
       options->capability.dispatch != NULL;
 }
@@ -359,6 +360,16 @@ enum capnweb_status iterate_kit_itx_mount_start(
     return CAPNWEB_E_INVALID_ARGUMENT;
   }
   mount->options = *options;
+  if (options->mind) {
+    /*
+     * The main import is the mind's root, as the person the upgrade's bearer
+     * named: `provide` goes straight to it. Capability {0} is the main import,
+     * which the session owns, so has_project_capability stays false and
+     * close() never releases it.
+     */
+    mount->project_capability = (struct capnweb_remote_capability){0};
+    return begin_provide(mount);
+  }
   mount->state = ITERATE_KIT_ITX_MOUNT_AUTHENTICATING;
   /*
    * THE TOKEN, IN-BAND — like every other bearer client. The blob's key is a
@@ -430,7 +441,7 @@ bool iterate_kit_itx_mount_probe_if_due(
   enum capnweb_status status;
   if (mount == NULL ||
       mount->state != ITERATE_KIT_ITX_MOUNT_READY ||
-      !mount->has_session_capability ||
+      (!mount->options.mind && !mount->has_session_capability) ||
       mount->probe_pending) {
     return false;
   }
@@ -441,7 +452,9 @@ bool iterate_kit_itx_mount_probe_if_due(
   }
   status = capnweb_session_call_path(
       mount->options.session,
-      mount->session_capability,
+      /* a mind's root answers whoami() itself; {0} is the main import */
+      mount->options.mind ? (struct capnweb_remote_capability){0}
+                          : mount->session_capability,
       whoami_path,
       sizeof(whoami_path) / sizeof(whoami_path[0]),
       no_arguments,

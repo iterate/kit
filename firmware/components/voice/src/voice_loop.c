@@ -1828,6 +1828,8 @@ static bool initialise_connection(void) {
   options.send_text_context = &transport;
   options.project_id = runtime.configuration.project_id;
   options.project_api_key = runtime.configuration.project_api_key;
+  options.mind = runtime.configuration.platform ==
+      ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
   options.capability_match = capability_match;
   options.capability = iterate_kit_peer_capability(&runtime.peer);
   /*
@@ -3034,6 +3036,17 @@ void iterate_kit_voice_loop_step(void) {
       iterate_kit_spsc_ring_metrics(&runtime.control_outbox, &probe_outbox);
       if (CONTROL_OUTBOX_SLOTS - probe_outbox.current_slots >= 3U) {
         (void)iterate_kit_itx_mount_probe_if_due(&runtime.connection.mount, now);
+      }
+      /*
+       * A MIND ENDS A SESSION WHEN ITS TOKEN ENDS. Ten minutes before, while
+       * no call is live or wanted, the socket is replaced; the transport
+       * renews the token before the next upgrade, so a call is never cut by
+       * the hour (iterate/kit/token_refresh.h).
+       */
+      if (!runtime.view.wants_call && !runtime.view.call_active &&
+          iterate_kit_itx_transport_credential_renewal_due(&transport)) {
+        ESP_LOGI(tag, "access token due for renewal — replacing the socket while idle");
+        iterate_kit_itx_transport_request_restart(&transport);
       }
       if (iterate_kit_itx_mount_abandon_overdue_probe(&runtime.connection.mount, now)) {
         if (runtime.heartbeat_restarts < UINT32_MAX) ++runtime.heartbeat_restarts;

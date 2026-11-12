@@ -1,6 +1,9 @@
 #include "iterate/kit/platforms/provisioning.h"
 
 #include "esp_partition.h"
+#include "nvs.h"
+
+#include <stdio.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -134,4 +137,60 @@ const char *iterate_kit_platform_provisioning_status_name(
       return "decode failed";
   }
   return "unknown ESP configuration status";
+}
+
+/*
+ * THE NEWEST REFRESH TOKEN, IN NVS. The configuration partition stays the
+ * image Kit wrote; NVS (which board.c already opens for the volume) keeps what
+ * the issuer rotated it into, beside a digest of the image's token it grew
+ * from. Writes come once a refresh, about once an hour while the board is on:
+ * NVS spreads them over its pages.
+ */
+static const char token_namespace[] = "iterate_token";
+
+static void seed_digest(const char *seed, char digest[9]) {
+  uint32_t hash = UINT32_C(2166136261);
+  for (const unsigned char *cursor = (const unsigned char *)seed; *cursor != '\0'; ++cursor) {
+    hash ^= *cursor;
+    hash *= UINT32_C(16777619);
+  }
+  (void)snprintf(digest, 9, "%08lx", (unsigned long)hash);
+}
+
+void iterate_kit_platform_refresh_token_load(
+    const struct iterate_kit_configuration *configuration,
+    char *destination,
+    size_t capacity) {
+  nvs_handle_t handle;
+  char expected[9];
+  char kept[9] = {0};
+  size_t size = sizeof(kept);
+  if (destination == NULL || capacity == 0U) return;
+  destination[0] = '\0';
+  if (configuration == NULL) return;
+  (void)snprintf(destination, capacity, "%s", configuration->oauth_refresh_token);
+  if (nvs_open(token_namespace, NVS_READONLY, &handle) != ESP_OK) return;
+  seed_digest(configuration->oauth_refresh_token, expected);
+  if (nvs_get_str(handle, "seed", kept, &size) == ESP_OK && strcmp(kept, expected) == 0) {
+    size = capacity;
+    if (nvs_get_str(handle, "token", destination, &size) != ESP_OK || destination[0] == '\0')
+      (void)snprintf(destination, capacity, "%s", configuration->oauth_refresh_token);
+  }
+  nvs_close(handle);
+}
+
+bool iterate_kit_platform_refresh_token_store(
+    const struct iterate_kit_configuration *configuration,
+    const char *token) {
+  nvs_handle_t handle;
+  char digest[9];
+  bool stored;
+  if (configuration == NULL || token == NULL || token[0] == '\0') return false;
+  if (nvs_open(token_namespace, NVS_READWRITE, &handle) != ESP_OK) return false;
+  seed_digest(configuration->oauth_refresh_token, digest);
+  stored = nvs_set_str(handle, "seed", digest) == ESP_OK &&
+      nvs_set_str(handle, "token", token) == ESP_OK &&
+      nvs_commit(handle) == ESP_OK;
+  nvs_close(handle);
+  return stored;
 }

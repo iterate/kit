@@ -177,3 +177,46 @@ function decodeLikeFirmware(image: Uint8Array) {
   }
   return fields;
 }
+
+const mindConfiguration: DeviceConfiguration = {
+  wifi: { ssid: "studio", password: "correct horse battery staple" },
+  iterate: {
+    baseUrl: "https://iterate.example.com",
+    clientId: "https://k.iterate.com/devices/mac/clients/00000000-0000-4000-8000-000000000000.json",
+    refreshToken: "user_1:grant_1:secret",
+  },
+  statusVoice: "spoken",
+};
+
+test("encodeDeviceConfiguration: a mind board carries its OAuth client and refresh token, and no project", () => {
+  const fields = decodeLikeFirmware(encodeDeviceConfiguration(mindConfiguration, 512));
+  expect(fields.get(3)).toBe("https://iterate.example.com");
+  expect(fields.get(7)).toBe(
+    "https://k.iterate.com/devices/mac/clients/00000000-0000-4000-8000-000000000000.json",
+  );
+  expect(fields.get(8)).toBe("user_1:grant_1:secret");
+  expect([...fields.keys()].sort()).toEqual([1, 2, 3, 6, 7, 8]);
+});
+
+test("encodeDeviceConfiguration: refuses a refresh token longer than the firmware holds", () => {
+  expect(() =>
+    encodeDeviceConfiguration(
+      {
+        ...mindConfiguration,
+        iterate: { ...mindConfiguration.iterate, refreshToken: "t".repeat(161) },
+      },
+      512,
+    ),
+  ).toThrow("refresh token is longer than firmware allows");
+});
+
+/** The mind golden image firmware/tests/configuration_fixture.h pins, so C and TypeScript agree. */
+test("encodeDeviceConfiguration: the mind golden image", () => {
+  const image = encodeDeviceConfiguration(mindConfiguration, 512);
+  const size = new DataView(image.buffer).getUint32(8, true) + 16;
+  expect(
+    Array.from(image.subarray(0, size), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+  ).toMatchInlineSnapshot(
+    `"495445524b495431bd000000e57ff5f901060073747564696f021c00636f727265637420686f727365206261747465727920737461706c65031b0068747470733a2f2f697465726174652e6578616d706c652e636f6d07530068747470733a2f2f6b2e697465726174652e636f6d2f646576696365732f6d61632f636c69656e74732f30303030303030302d303030302d343030302d383030302d3030303030303030303030302e6a736f6e081500757365725f313a6772616e745f313a73656372657406060073706f6b656e"`,
+  );
+});

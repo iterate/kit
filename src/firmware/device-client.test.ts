@@ -16,7 +16,10 @@ test.for(firmwareCatalog)(
           client_id: url.href,
           client_name: device.name,
           logo_uri: `https://k.iterate.com/vendors/${device.vendor.icon}`,
-          redirect_uris: ["https://k.iterate.com/.auth/callback"],
+          redirect_uris: [
+            "https://k.iterate.com/.auth/callback",
+            `https://k.iterate.com/devices/${device.id}/mind`,
+          ],
           token_endpoint_auth_method: "none",
         });
         return metadata;

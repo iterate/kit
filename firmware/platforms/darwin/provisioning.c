@@ -2,6 +2,8 @@
 #include "iterate/kit/platforms/provisioning.h"
 
 #include <errno.h>
+#include <stdint.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -78,4 +80,70 @@ const char *iterate_kit_platform_provisioning_status_name(
     case ITERATE_KIT_PLATFORM_PROVISIONING_DECODE_FAILED: return "decode-failed";
   }
   return "unknown";
+}
+
+/*
+ * THE NEWEST REFRESH TOKEN, IN A FILE BESIDE THE IMAGE (`<--config>.token`):
+ * one line with a digest of the image's own token, one with the newest. The
+ * image stays what Kit's encoder wrote.
+ */
+static void seed_digest(const char *seed, char digest[9]) {
+  uint32_t hash = UINT32_C(2166136261);
+  for (const unsigned char *cursor = (const unsigned char *)seed; *cursor != '\0'; ++cursor) {
+    hash ^= *cursor;
+    hash *= UINT32_C(16777619);
+  }
+  (void)snprintf(digest, 9, "%08lx", (unsigned long)hash);
+}
+
+static bool token_path(char *path, size_t capacity) {
+  if (image_path == NULL || image_path[0] == '\0') return false;
+  const int written = snprintf(path, capacity, "%s.token", image_path);
+  return written > 0 && (size_t)written < capacity;
+}
+
+void iterate_kit_platform_refresh_token_load(
+    const struct iterate_kit_configuration *configuration,
+    char *destination,
+    size_t capacity) {
+  char path[1024];
+  char line[ITERATE_KIT_OAUTH_TOKEN_CAPACITY + 2];
+  char expected[9];
+  FILE *file;
+  if (destination == NULL || capacity == 0U) return;
+  destination[0] = '\0';
+  if (configuration == NULL) return;
+  (void)snprintf(destination, capacity, "%s", configuration->oauth_refresh_token);
+  if (!token_path(path, sizeof(path))) return;
+  file = fopen(path, "r");
+  if (file == NULL) return;
+  seed_digest(configuration->oauth_refresh_token, expected);
+  if (fgets(line, sizeof(line), file) != NULL && strncmp(line, expected, 8U) == 0 &&
+      fgets(line, sizeof(line), file) != NULL) {
+    line[strcspn(line, "\r\n")] = '\0';
+    if (line[0] != '\0') (void)snprintf(destination, capacity, "%s", line);
+  }
+  memset(line, 0, sizeof(line));
+  (void)fclose(file);
+}
+
+bool iterate_kit_platform_refresh_token_store(
+    const struct iterate_kit_configuration *configuration,
+    const char *token) {
+  char path[1024];
+  char temporary[1040];
+  char digest[9];
+  FILE *file;
+  bool written;
+  if (configuration == NULL || token == NULL || token[0] == '\0' ||
+      !token_path(path, sizeof(path)))
+    return false;
+  (void)snprintf(temporary, sizeof(temporary), "%s.new", path);
+  seed_digest(configuration->oauth_refresh_token, digest);
+  file = fopen(temporary, "w");
+  if (file == NULL) return false;
+  (void)chmod(temporary, 0600);
+  written = fprintf(file, "%s\n%s\n", digest, token) > 0;
+  written = fclose(file) == 0 && written;
+  return written && rename(temporary, path) == 0;
 }

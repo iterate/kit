@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from "./routes/__root.tsx";
 import { Route as IndexRouteImport } from "./routes/index.tsx";
 import { Route as AuthRouteImport } from "./routes/_auth.tsx";
 import { Route as AuthDevicesDeviceIdRouteImport } from "./routes/_auth/devices.$deviceId.tsx";
+import { Route as DevicesDeviceIdMindRouteImport } from "./routes/devices.$deviceId.mind.tsx";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
@@ -27,32 +28,46 @@ const AuthDevicesDeviceIdRoute = AuthDevicesDeviceIdRouteImport.update({
   path: "/devices/$deviceId",
   getParentRoute: () => AuthRoute,
 } as any);
+const DevicesDeviceIdMindRoute = DevicesDeviceIdMindRouteImport.update({
+  id: "/devices/$deviceId/mind",
+  path: "/devices/$deviceId/mind",
+  getParentRoute: () => rootRouteImport,
+} as any);
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/devices/$deviceId": typeof AuthDevicesDeviceIdRoute;
+  "/devices/$deviceId/mind": typeof DevicesDeviceIdMindRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/devices/$deviceId": typeof AuthDevicesDeviceIdRoute;
+  "/devices/$deviceId/mind": typeof DevicesDeviceIdMindRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
   "/_auth": typeof AuthRouteWithChildren;
   "/_auth/devices/$deviceId": typeof AuthDevicesDeviceIdRoute;
+  "/devices/$deviceId/mind": typeof DevicesDeviceIdMindRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/devices/$deviceId";
+  fullPaths: "/" | "/devices/$deviceId" | "/devices/$deviceId/mind";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/devices/$deviceId";
-  id: "__root__" | "/" | "/_auth" | "/_auth/devices/$deviceId";
+  to: "/" | "/devices/$deviceId" | "/devices/$deviceId/mind";
+  id:
+    | "__root__"
+    | "/"
+    | "/_auth"
+    | "/_auth/devices/$deviceId"
+    | "/devices/$deviceId/mind";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   AuthRoute: typeof AuthRouteWithChildren;
+  DevicesDeviceIdMindRoute: typeof DevicesDeviceIdMindRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -78,6 +93,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof AuthDevicesDeviceIdRouteImport;
       parentRoute: typeof AuthRoute;
     };
+    "/devices/$deviceId/mind": {
+      id: "/devices/$deviceId/mind";
+      path: "/devices/$deviceId/mind";
+      fullPath: "/devices/$deviceId/mind";
+      preLoaderRoute: typeof DevicesDeviceIdMindRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
   }
 }
 
@@ -94,6 +116,7 @@ const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren);
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthRoute: AuthRouteWithChildren,
+  DevicesDeviceIdMindRoute: DevicesDeviceIdMindRoute,
 };
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -4,6 +4,7 @@
 #include "iterate/kit/configuration.h"
 #include "iterate/kit/itx_connection.h"
 #include "iterate/kit/itx_credential_retry.h"
+#include "iterate/kit/token_refresh.h"
 #include "iterate/kit/itx_outbox_sender.h"
 #include "iterate/kit/platforms/posix_tls_stream.h"
 #include "iterate/kit/retry_gate.h"
@@ -122,9 +123,9 @@ struct iterate_kit_itx_transport {
   struct iterate_kit_websocket_text_outbox control_outbox;
   struct iterate_kit_itx_outbox_sender control_sender;
   char websocket_url[ITERATE_KIT_ITX_WEBSOCKET_URL_CAPACITY];
-  /* The upgrade's `Authorization: Bearer <key>` line. */
+  /* The upgrade's `Authorization: Bearer <key or access token>` line. */
   char websocket_headers[
-      sizeof("Authorization: Bearer \r\n") + ITERATE_KIT_PROJECT_API_KEY_CAPACITY];
+      sizeof("Authorization: Bearer \r\n") + ITERATE_KIT_OAUTH_TOKEN_CAPACITY];
   uint8_t websocket_receive_storage[
       ITERATE_KIT_POSIX_CONTROL_MESSAGE_CAPACITY];
   uint8_t websocket_transmit_storage[
@@ -134,6 +135,16 @@ struct iterate_kit_itx_transport {
   struct iterate_kit_posix_tls_stream stream;
   struct iterate_kit_retry_gate websocket_retry;
   struct iterate_kit_itx_credential_retry credential_retry;
+  /* A mind board's credential (token_refresh.h), as on the ESP transport. */
+  struct iterate_kit_token_refresh token_refresh;
+  struct iterate_kit_tokens tokens;
+  char refresh_token[ITERATE_KIT_OAUTH_TOKEN_CAPACITY];
+  char oauth_resource[ITERATE_KIT_OS_BASE_URL_CAPACITY + 4];
+  int64_t access_token_renew_at_us;
+  int64_t token_refresh_deadline_us;
+  bool token_refresh_active;
+  uint32_t token_refreshes;
+  uint32_t token_refresh_failures;
   enum iterate_kit_itx_transport_state state;
   enum capnweb_status last_capnweb_status;
   int64_t websocket_open_deadline_us;
@@ -182,6 +193,16 @@ enum capnweb_status iterate_kit_itx_transport_send_text(
 
 void iterate_kit_itx_transport_request_restart(
     struct iterate_kit_itx_transport *transport);
+
+/**
+ * A MIND BOARD'S TOKEN IS DUE FOR RENEWAL: the access token the live session
+ * rode is within its last ten minutes. A mind ends a session when its token
+ * ends, so the loop replaces the socket while no call is live
+ * (request_restart), and the next upgrade renews the token first. Always
+ * false on the old platform, whose key has no expiry. Safe from any task.
+ */
+bool iterate_kit_itx_transport_credential_renewal_due(
+    const struct iterate_kit_itx_transport *transport);
 
 enum iterate_kit_status iterate_kit_itx_transport_stop(
     struct iterate_kit_itx_transport *transport);

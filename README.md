@@ -31,6 +31,27 @@ iterate's own zones, and its discovery document names it), then the selector's b
 **Log in with &lt;its host&gt;** and consent happens there. The board is flashed with that
 platform's address. **Set up another device** keeps the platform.
 
+### A board for a mind
+
+A mind is iterate at its own domain ([iterate/core](https://github.com/iterate/core)), such as
+`templestein.family`. Choose the board, type the mind's address under **Set it up for a mind** and
+click **Continue** (`/devices/<model>/mind`). **Sign in to the mind** sends you to the mind's own
+sign-in (`https://iterate.<domain>`), where you approve the board as its own OAuth client; the mind
+sends you back with a code, and the page trades it at the mind's token endpoint for the board's
+grant (`src/firmware/mind-sign-in.ts`). Then enter Wi-Fi and flash, as above. Nothing goes through
+Kit's Worker: a mind's `/api` answers no other origin, and its issuer answers Kit's origin only at
+the token endpoint.
+
+The board gets the grant's refresh token, not an access token: a mind issues no token without an
+expiry. Before each connection the board trades it for an hour's access token at
+`https://iterate.<domain>/oauth2/token`, keeps the rotated refresh token (NVS on a board, a file
+beside `--config` on the Mac), and dials `wss://iterate.<domain>/api`, where the session is already
+the mind's root: it lends `itx.clients.<board>` and provisions its voice contexts
+(`itx.voice.ensureVoiceDevice`). The mind must already run voice (its config installs
+`@iterate-com/voice` and holds an OpenAI key); Kit prepares nothing there. The grant lives while
+the board uses it and ends after 7 days with no use, when its person stops being a member, or when
+it is revoked from the mind's keys page. A board left off for longer must be set up again.
+
 Preparing checks the project's voice. The form asks for an OpenAI API key as soon as the
 picked project turns out to have none. It verifies voice health before minting a token with no
 expiry, scoped to the chosen project, under the same OAuth client that was authorized. Existing
@@ -116,7 +137,7 @@ every PR.
 
 ```sh
 pnpm install
-pnpm dev                 # the installer, signing in against os.iterate.com
+pnpm dev                 # the installer
 pnpm typecheck && pnpm lint && pnpm format:check && pnpm test
 pnpm firmware:test:host  # needs cmake
 ```

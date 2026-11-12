@@ -21,6 +21,10 @@ enum {
   ITERATE_KIT_OS_BASE_URL_CAPACITY = 129,
   ITERATE_KIT_PROJECT_ID_CAPACITY = 65,
   ITERATE_KIT_PROJECT_API_KEY_CAPACITY = 129,
+  /* A mind board's OAuth client: Kit's client metadata document URL. */
+  ITERATE_KIT_OAUTH_CLIENT_ID_CAPACITY = 193,
+  /* An OAuth token of a mind's issuer, `<user id>:<grant id>:<secret>`. */
+  ITERATE_KIT_OAUTH_TOKEN_CAPACITY = 161,
   /* "https://" (8) becomes "wss://" (6) and "/api" (4) is appended: two
    * bytes more than the base URL. */
   ITERATE_KIT_ITX_WEBSOCKET_URL_CAPACITY =
@@ -44,6 +48,24 @@ enum iterate_kit_status_voice {
 };
 
 /**
+ * WHICH PLATFORM THE BOARD BELONGS TO. An image names one of two:
+ *
+ *   PROJECT  the old platform (os.iterate.com): a project id and a personal
+ *            access token with no expiry, presented as it is.
+ *   MIND     a mind (iterate/core): the mind's platform origin
+ *            (`https://iterate.<domain>`) in `os_base_url`, an OAuth client id
+ *            and a refresh token of the person who set the board up. The board
+ *            trades the refresh token for an access token at the mind's
+ *            issuer (iterate/kit/token_refresh.h) before each upgrade.
+ *
+ * An image with both sets, or with neither set whole, is refused.
+ */
+enum iterate_kit_configuration_platform {
+  ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT = 0,
+  ITERATE_KIT_CONFIGURATION_PLATFORM_MIND,
+};
+
+/**
  * Fixed-capacity, NUL-terminated boot configuration. The decoder allocates no
  * memory and clears every field on every error, so callers never observe a
  * partially decoded credential set. Treat these fields as secrets: this type
@@ -56,6 +78,13 @@ struct iterate_kit_configuration {
   char os_base_url[ITERATE_KIT_OS_BASE_URL_CAPACITY];
   char project_id[ITERATE_KIT_PROJECT_ID_CAPACITY];
   char project_api_key[ITERATE_KIT_PROJECT_API_KEY_CAPACITY];
+  /** MIND only: the OAuth client the person authorized for this board. */
+  char oauth_client_id[ITERATE_KIT_OAUTH_CLIENT_ID_CAPACITY];
+  /** MIND only: the refresh token Kit wrote. The board keeps the newer one
+   *  each refresh returns in its own storage (provisioning.h). */
+  char oauth_refresh_token[ITERATE_KIT_OAUTH_TOKEN_CAPACITY];
+  /** An `enum iterate_kit_configuration_platform`. */
+  uint8_t platform;
   /** An `enum iterate_kit_status_voice`, one byte so the struct stays small. */
   uint8_t status_voice;
 };

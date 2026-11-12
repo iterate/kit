@@ -22,36 +22,42 @@ import { DeviceLogs } from "./device-logs.tsx";
 
 /** What the setup form hands the wizard: a snapshot of the fields when it was submitted. */
 export interface SetupInput {
-  project: { id: string; slug: string };
-  openaiKey: string;
+  /** What the board is set up for, as the person knows it: a project's slug, or a mind's address. */
+  target: { kind: "project" | "mind"; name: string };
   wifi: { ssid: string; password: string };
   statusVoice: StatusVoice;
 }
 
 /**
- * Setting up a board, start to finish, in one dialog: prepare the project (`preparing`, which the
+ * Setting up a board, start to finish, in one dialog: prepare the project or mind (`preparing`, which the
  * page's form starts), say what the browser is about to ask, flash, then say what to do with the
  * board. Each step is the state of a mutation, so there is nothing else to keep in sync: the
  * dialog is open while `preparing` has been started, and closing it resets them all. Show logs
  * (`logging`) covers whichever step it was opened from, and Back returns there.
  */
-export function SetupWizard({
+export function SetupWizard<Input extends SetupInput>({
   preparing,
   device,
   manifest,
 }: {
-  preparing: UseMutationResult<DeviceConfiguration, Error, SetupInput>;
+  preparing: UseMutationResult<DeviceConfiguration, Error, Input>;
   device: FirmwareDevice;
   manifest: FirmwareManifest;
 }) {
   const queryClient = useQueryClient();
   const flashing = useMutation({
-    mutationFn: (input: { configuration: DeviceConfiguration; erase: boolean; attempt: string }) =>
+    mutationFn: (input: {
+      configuration: DeviceConfiguration;
+      erase: boolean;
+      configurationOnly: boolean;
+      attempt: string;
+    }) =>
       flashDevice({
         manifest,
         device,
         configuration: input.configuration,
         erase: input.erase,
+        configurationOnly: input.configurationOnly,
         onProgress: (progress) =>
           queryClient.setQueryData(flashProgressKey(input.attempt), progress),
       }),
@@ -93,10 +99,11 @@ export function SetupWizard({
             {preparing.isPending && (
               <>
                 <DialogHeader>
-                  <DialogTitle>Preparing {preparing.variables.project.slug}</DialogTitle>
+                  <DialogTitle>Preparing {preparing.variables.target.name}</DialogTitle>
                   <DialogDescription>
-                    Installing the voice agent if the project needs one, then creating the device’s
-                    access token.
+                    {preparing.variables.target.kind === "project"
+                      ? "Installing the voice agent if the project needs one, then creating the device’s access token."
+                      : "Getting the device’s sign-in from the mind."}
                   </DialogDescription>
                 </DialogHeader>
                 <Spinner />
@@ -106,7 +113,7 @@ export function SetupWizard({
             {preparing.isError && (
               <>
                 <DialogHeader>
-                  <DialogTitle>Couldn’t prepare {preparing.variables.project.slug}</DialogTitle>
+                  <DialogTitle>Couldn’t prepare {preparing.variables.target.name}</DialogTitle>
                 </DialogHeader>
                 <p role="alert" data-type="error" className="text-destructive">
                   {preparing.error.message}
@@ -127,6 +134,7 @@ export function SetupWizard({
                   flashing.mutate({
                     configuration: preparing.data,
                     erase: new FormData(event.currentTarget).has("erase"),
+                    configurationOnly: new FormData(event.currentTarget).has("configuration-only"),
                     attempt: crypto.randomUUID(),
                   });
                 }}
@@ -134,7 +142,7 @@ export function SetupWizard({
                 <DialogHeader>
                   <DialogTitle>Flash {device.name}</DialogTitle>
                   <DialogDescription>
-                    {preparing.variables.project.slug} is ready. Next, write the firmware to the
+                    {preparing.variables.target.name} is ready. Next, write the firmware to the
                     board.
                   </DialogDescription>
                 </DialogHeader>
@@ -156,6 +164,19 @@ export function SetupWizard({
                     <FieldDescription>
                       Clears what other firmware left behind, such as Home Assistant’s. Slower, and
                       recommended the first time.
+                    </FieldDescription>
+                  </FieldContent>
+                </Field>
+                <Field orientation="horizontal">
+                  <Checkbox id="configuration-only" name="configuration-only" />
+                  <FieldContent>
+                    <FieldLabel htmlFor="configuration-only">
+                      Only set it up again (keep its firmware)
+                    </FieldLabel>
+                    <FieldDescription>
+                      For a board that already runs {manifest.version}: writes the Wi-Fi and sign-in
+                      alone, in seconds, and never erases. Use it when the board says to set it up
+                      again.
                     </FieldDescription>
                   </FieldContent>
                 </Field>
@@ -218,10 +239,14 @@ export function SetupWizard({
                 </DialogHeader>
                 <ol className="flex list-decimal flex-col gap-2 pl-5">
                   <li>{device.startCall}</li>
-                  <li>
-                    Ask “What’s my project called?” It should say “
-                    {preparing.variables.project.slug}”.
-                  </li>
+                  {preparing.variables.target.kind === "project" ? (
+                    <li>
+                      Ask “What’s my project called?” It should say “
+                      {preparing.variables.target.name}”.
+                    </li>
+                  ) : (
+                    <li>Ask it something only {preparing.variables.target.name} would know.</li>
+                  )}
                 </ol>
                 <p className="text-muted-foreground">
                   If it can’t connect, Show logs says what it’s doing. It only joins 2.4 GHz
