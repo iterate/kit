@@ -428,12 +428,13 @@ static void refuses_to_probe_before_ready(void) {
 }
 
 /*
- * A MIND'S SESSION IS ALREADY THE MIND. The upgrade's bearer made the main
- * import the mind's root context, so the mount's one call is `provide` on
- * import 0, the probe asks that root's `whoami()`, and close releases the rule
- * alone: the main import is the session's, never the mount's.
+ * A MIND'S API ROOT IS NOT THE MIND (iterate/core `ControlPlaneApi`): it has
+ * `authenticate`, and `provide` on it is rejected. The mount asks
+ * `authenticate()` with no argument, for the credential the upgrade carried,
+ * then `mind.cd("/")` for the mind's root context, then `provide` on that
+ * root. The probe asks the root's `whoami()`: the session has none.
  */
-static void mounts_on_a_mind_with_one_call(void) {
+static void mounts_on_a_mind_through_authenticate(void) {
   struct fixture fixture;
   const struct iterate_kit_itx_mount_options options = {
     &fixture.session,
@@ -445,36 +446,49 @@ static void mounts_on_a_mind_with_one_call(void) {
   };
   fixture_init(&fixture);
   assert(iterate_kit_itx_mount_start(&fixture.mount, &options) == CAPNWEB_OK);
-  assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_PROVIDING);
+  assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_AUTHENTICATING);
   assert(fixture.captured_count == 2U);
+  /* no token in-band: the upgrade's bearer is the credential */
   assert(strcmp(
       fixture.captured[0],
-      "[\"push\",[\"pipeline\",0,[\"provide\"],"
-      "[\"itx.clients.m5stick_s3\",[\"export\",-1]]]]") == 0);
+      "[\"push\",[\"pipeline\",0,[\"authenticate\"],[]]]") == 0);
   assert(strcmp(fixture.captured[1], "[\"pull\",1]") == 0);
 
   receive(&fixture, "[\"resolve\",1,[\"export\",-10]]");
+  assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_GETTING_PROJECT);
+  assert(fixture.captured_count == 5U);
+  assert(strcmp(
+      fixture.captured[3],
+      "[\"push\",[\"pipeline\",-10,[\"mind\",\"cd\"],[\"/\"]]]") == 0);
+
+  receive(&fixture, "[\"resolve\",2,[\"export\",-11]]");
+  assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_PROVIDING);
+  assert(fixture.mount.has_session_capability);
+  assert(fixture.mount.has_project_capability);
+  assert(fixture.mount.project_capability.id == -11);
+  assert(fixture.captured_count == 8U);
+  assert(strcmp(
+      fixture.captured[6],
+      "[\"push\",[\"pipeline\",-11,[\"provide\"],"
+      "[\"itx.clients.m5stick_s3\",[\"export\",-1]]]]") == 0);
+
+  receive(&fixture, "[\"resolve\",3,[\"export\",-12]]");
   assert(fixture.mount.state == ITERATE_KIT_ITX_MOUNT_READY);
   assert(fixture.mount.has_rule_capability);
-  assert(!fixture.mount.has_project_capability);
-  assert(!fixture.mount.has_session_capability);
-  assert(fixture.mount.project_capability.id == 0);
 
   assert(iterate_kit_itx_mount_probe_if_due(&fixture.mount, 1000U));
   assert(strstr(fixture.captured[fixture.captured_count - 2U],
-                "[\"push\",[\"pipeline\",0,[\"whoami\"]") != NULL);
+                "[\"push\",[\"pipeline\",-11,[\"whoami\"]") != NULL);
 
-  {
-    const size_t before = fixture.captured_count;
-    assert(iterate_kit_itx_mount_close(&fixture.mount) == CAPNWEB_OK);
-    /* the rule's release and nothing else */
-    assert(fixture.captured_count == before + 1U);
-    assert(strstr(fixture.captured[before], "[\"release\",-10,") != NULL);
-  }
+  assert(iterate_kit_itx_mount_close(&fixture.mount) == CAPNWEB_OK);
+  assert(!fixture.mount.has_rule_capability);
+  assert(!fixture.mount.has_project_capability);
+  assert(!fixture.mount.has_session_capability);
+  capnweb_session_close(&fixture.session);
 }
 
 int main(void) {
-  mounts_on_a_mind_with_one_call();
+  mounts_on_a_mind_through_authenticate();
   mounts_and_retains_the_project_and_the_rule();
   authentication_rejection_is_terminal_and_not_retried();
   invalid_project_result_is_classified_and_releases_session();

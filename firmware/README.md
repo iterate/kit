@@ -227,8 +227,9 @@ names one platform whole; both, or half of one, is refused. Before each upgrade
 the transport trades the refresh token for an access token at the issuer's
 `/oauth2/token` (`components/core/include/iterate/kit/token_refresh.h`), keeps
 the rotated refresh token (NVS namespace `iterate_token` on a board, `<config>.token`
-on the Mac), and presents the access token as the upgrade's bearer. The session's
-main import is then the mind's root, so the mount makes one call, `provide`
+on the Mac), and presents the access token as the upgrade's bearer. The mount
+then calls `authenticate()` on the API's root, which takes that bearer,
+`mind.cd("/")` for the mind's root context, and `provide` on that root
 (`itx_mount.h`). A refused grant (400 or 401) backs off like a refused key and
 says "set me up again".
 
