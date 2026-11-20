@@ -57,7 +57,7 @@ struct iterate_kit_itx_connection_options {
   struct capnweb_capability capability;
   iterate_kit_itx_connection_session_ended_fn session_ended;
   void *session_ended_context;
-  /** A mind's session: the mount's one call (itx_mount.h `mind`). Then
+  /** A mind's session: the mount's calls for a mind (itx_mount.h `mind`). Then
    *  project_id and project_api_key may be NULL. */
   bool mind;
 };

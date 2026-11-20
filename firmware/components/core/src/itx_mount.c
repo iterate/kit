@@ -16,6 +16,7 @@
  */
 static const char *const authenticate_path[] = {"authenticate"};
 static const char *const projects_get_path[] = {"projects", "get"};
+static const char *const mind_cd_path[] = {"mind", "cd"};
 static const char *const provide_path[] = {"provide"};
 static const char *const whoami_path[] = {"whoami"};
 
@@ -192,20 +193,25 @@ static enum capnweb_status begin_get_project(
     struct iterate_kit_itx_mount *mount) {
   struct capnweb_expression project_id;
   enum capnweb_status status;
+  /*
+   * A MIND'S ROOT CONTEXT is the session's `mind`, and the C client has no
+   * property read: `mind.cd("/")` answers the same root as a capability.
+   */
+  const char *const address =
+      mount->options.mind ? "/" : mount->options.project_id;
 
   project_id = (struct capnweb_expression){
     CAPNWEB_EXPRESSION_STRING,
-    {.string = {
-      mount->options.project_id,
-      strlen(mount->options.project_id),
-    }},
+    {.string = {address, strlen(address)}},
   };
   mount->state = ITERATE_KIT_ITX_MOUNT_GETTING_PROJECT;
   status = capnweb_session_call_expressions(
       mount->options.session,
       mount->session_capability,
-      projects_get_path,
-      sizeof(projects_get_path) / sizeof(projects_get_path[0]),
+      mount->options.mind ? mind_cd_path : projects_get_path,
+      mount->options.mind
+          ? sizeof(mind_cd_path) / sizeof(mind_cd_path[0])
+          : sizeof(projects_get_path) / sizeof(projects_get_path[0]),
       &project_id,
       1U,
       project_completed,
@@ -360,17 +366,29 @@ enum capnweb_status iterate_kit_itx_mount_start(
     return CAPNWEB_E_INVALID_ARGUMENT;
   }
   mount->options = *options;
+  mount->state = ITERATE_KIT_ITX_MOUNT_AUTHENTICATING;
   if (options->mind) {
     /*
-     * The main import is the mind's root, as the person the upgrade's bearer
-     * named: `provide` goes straight to it. Capability {0} is the main import,
-     * which the session owns, so has_project_capability stays false and
-     * close() never releases it.
+     * A MIND'S API ROOT IS SMALL: `about` and `authenticate`, and nothing of
+     * the mind (iterate/core `ControlPlaneApi`). `authenticate()` with no
+     * argument takes the credential the upgrade carried, its `Authorization`
+     * bearer, so no token is spelled here.
      */
-    mount->project_capability = (struct capnweb_remote_capability){0};
-    return begin_provide(mount);
+    status = capnweb_session_call_expressions(
+        options->session,
+        (struct capnweb_remote_capability){0},
+        authenticate_path,
+        sizeof(authenticate_path) / sizeof(authenticate_path[0]),
+        NULL,
+        0U,
+        authenticated,
+        mount);
+    if (status != CAPNWEB_OK) {
+      return fail(
+          mount, ITERATE_KIT_ITX_MOUNT_FAILURE_AUTH_CALL, status);
+    }
+    return CAPNWEB_OK;
   }
-  mount->state = ITERATE_KIT_ITX_MOUNT_AUTHENTICATING;
   /*
    * THE TOKEN, IN-BAND — like every other bearer client. The blob's key is a
    * personal access token the Kit page minted for the person who set this
@@ -441,7 +459,7 @@ bool iterate_kit_itx_mount_probe_if_due(
   enum capnweb_status status;
   if (mount == NULL ||
       mount->state != ITERATE_KIT_ITX_MOUNT_READY ||
-      (!mount->options.mind && !mount->has_session_capability) ||
+      !mount->has_session_capability ||
       mount->probe_pending) {
     return false;
   }
@@ -452,8 +470,8 @@ bool iterate_kit_itx_mount_probe_if_due(
   }
   status = capnweb_session_call_path(
       mount->options.session,
-      /* a mind's root answers whoami() itself; {0} is the main import */
-      mount->options.mind ? (struct capnweb_remote_capability){0}
+      /* a mind's session has no whoami(): its root context answers it */
+      mount->options.mind ? mount->project_capability
                           : mount->session_capability,
       whoami_path,
       sizeof(whoami_path) / sizeof(whoami_path[0]),
