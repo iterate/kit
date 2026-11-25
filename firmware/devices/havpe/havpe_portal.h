@@ -13,10 +13,10 @@ extern "C" {
 #endif
 
 /**
- * Consume the one-boot RTC flag set by `POST /enter-setup` on the LAN page so
- * the board boots once into encrypted Setup Mode (WPA2 SoftAP) while keeping
- * its saved Wi-Fi and Mind credentials intact. Returns true only after a
- * software restart that explicitly armed the flag.
+ * Consume the one-boot RTC flag set by the physical Enter Setup Mode gesture
+ * (Mute ON + hold 3 s) so the board boots once into encrypted Setup Mode
+ * (WPA2 SoftAP) while keeping its saved Wi-Fi and Mind credentials intact.
+ * Returns true only after a software restart that explicitly armed the flag.
  */
 bool havpe_portal_consume_setup_ap_request(void);
 

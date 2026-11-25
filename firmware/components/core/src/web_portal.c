@@ -16,15 +16,14 @@ bool iterate_kit_web_action_allowed(
   switch (action) {
     case ITERATE_KIT_WEB_ACTION_WIFI:
     case ITERATE_KIT_WEB_ACTION_MIND:
-      /* Credentials (Wi-Fi password, OAuth refresh token, project API key) are
-       * accepted ONLY on the board's own WPA2-PSK SoftAP, never over plain-HTTP LAN. */
+    case ITERATE_KIT_WEB_ACTION_REBOOT:
+      /* Credentials (Wi-Fi password, Mind refresh token) and exiting one-boot
+       * Setup Mode are permitted ONLY on the board's WPA2-PSK SoftAP. */
       return mode == ITERATE_KIT_BOOT_MODE_SETUP_AP;
     case ITERATE_KIT_WEB_ACTION_SETTINGS:
-    case ITERATE_KIT_WEB_ACTION_REBOOT:
+      /* Non-secret status voice and speaker volume are permitted on both
+       * Setup AP and (for a visually confirmed browser) LAN. */
       return true;
-    case ITERATE_KIT_WEB_ACTION_ENTER_SETUP:
-    case ITERATE_KIT_WEB_ACTION_RESET_WIFI:
-      return mode != ITERATE_KIT_BOOT_MODE_SETUP_AP;
   }
   return false;
 }
@@ -496,10 +495,11 @@ void iterate_kit_web_apply_settings_form(
 
   set_result(
       result, true,
-      voice_changed ? "Settings saved. Restarting to apply status voice."
+      voice_changed ? "Settings saved. Status voice takes effect on next restart."
                     : "Settings saved.");
   result->config_changed = voice_changed;
-  result->reboot_needed = voice_changed;
+  /* Never trigger a reboot from LAN settings; reboot only when in Setup AP if needed. */
+  result->reboot_needed = false;
   result->apply_volume = volume_present;
   result->new_volume = volume_value;
 }
@@ -584,6 +584,26 @@ static const char *rssi_label(int8_t rssi) {
   return "Weak";
 }
 
+static const char *claim_color_css(enum iterate_kit_claim_color color) {
+  switch (color) {
+    case ITERATE_KIT_CLAIM_COLOR_BLUE: return "#2563eb";
+    case ITERATE_KIT_CLAIM_COLOR_GREEN: return "#16a34a";
+    case ITERATE_KIT_CLAIM_COLOR_AMBER: return "#d97706";
+    case ITERATE_KIT_CLAIM_COLOR_MAGENTA: return "#c026d3";
+  }
+  return "#111";
+}
+
+static const char *claim_pos_border_css(enum iterate_kit_claim_position pos) {
+  switch (pos) {
+    case ITERATE_KIT_CLAIM_POS_TOP: return "border-top-color";
+    case ITERATE_KIT_CLAIM_POS_RIGHT: return "border-right-color";
+    case ITERATE_KIT_CLAIM_POS_BOTTOM: return "border-bottom-color";
+    case ITERATE_KIT_CLAIM_POS_LEFT: return "border-left-color";
+  }
+  return "border-top-color";
+}
+
 size_t iterate_kit_web_render_page(
     const struct iterate_kit_configuration *configuration,
     const struct iterate_kit_configuration_presence *presence,
@@ -615,8 +635,13 @@ size_t iterate_kit_web_render_page(
 
   w_puts(&w,
       "<!doctype html><html lang=en><head><meta charset=utf-8>"
-      "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-      "<title>");
+      "<meta name=viewport content=\"width=device-width,initial-scale=1\">");
+  if (!setup_ap && status->claim_is_mine &&
+      status->claim_state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+    /* Auto-refresh every 3 s while waiting for the owner's confirming physical tap. */
+    w_puts(&w, "<meta http-equiv=refresh content=3>");
+  }
+  w_puts(&w, "<title>");
   w_html(&w, status->hostname[0] ? status->hostname : "iterate");
   w_puts(&w,
       "</title><style>"
@@ -630,12 +655,14 @@ size_t iterate_kit_web_render_page(
       "input,select,button{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #ccd2da;border-radius:7px;font-size:.95rem}"
       "button{background:#111;color:#fff;border:0;font-weight:600;margin-top:10px;cursor:pointer}"
       "button.sec{background:#eef1f5;color:#111;border:1px solid #d5dbe3}"
-      "button.warn{background:#b91c1c;color:#fff}"
       ".msg{padding:10px 12px;border-radius:8px;margin:0 0 12px;font-size:.9rem}"
       ".ok{background:#e7f6ec;color:#14532d;border:1px solid #b7e4c7}"
       ".err{background:#fdecec;color:#7f1d1d;border:1px solid #f5c2c2}"
       ".ap{display:flex;justify-content:space-between;align-items:center;padding:7px 9px;margin:4px 0;border:1px solid #e2e5ea;border-radius:7px;background:#fafbfc;color:#111;font-weight:400}"
       ".hint{font-size:.8rem;color:#555;margin:6px 0 0}"
+      ".ringbox{display:flex;align-items:center;gap:14px;padding:10px;border-radius:8px;background:#f8fafc;border:1px solid #d5dbe3;margin:8px 0}"
+      ".ring{width:46px;height:46px;border-radius:50%;border:10px solid #e2e5ea;flex:0 0 auto;box-sizing:border-box}"
+      "ul.g{margin:6px 0 0;padding-left:18px;font-size:.85rem;color:#333}ul.g li{margin:4px 0}"
       "</style></head><body>");
 
   w_puts(&w, "<h1>");
@@ -656,11 +683,11 @@ size_t iterate_kit_web_render_page(
     w_puts(&w, "</div>");
   }
 
-  /* --- Status card --- */
+  /* --- Status card (read-only for anyone on LAN) --- */
   w_puts(&w, "<div class=card><h2>Status</h2>");
   w_puts(&w, "<div class=row><span class=k>Connection</span><span class=v>");
   if (status->key_refused) {
-    w_puts(&w, "Key refused (reconnect mind in Setup Mode)");
+    w_puts(&w, "Key refused (enter Setup Mode on puck to reconnect mind)");
   } else if (status->connection_state[0] != '\0') {
     w_html(&w, status->connection_state);
   } else {
@@ -705,37 +732,54 @@ size_t iterate_kit_web_render_page(
   w_html(&w, status->firmware_version[0] ? status->firmware_version : "dev");
   w_puts(&w, "</span></div></div>");
 
-  /* --- LAN authorization banner / per-browser unlock or physical claim --- */
+  /* --- LAN browser pairing (2-tap visual confirmation; setup code NEVER sent on LAN) --- */
   if (!setup_ap) {
-    w_puts(&w, "<div class=card><h2>Changes</h2>");
+    w_puts(&w, "<div class=card><h2>Browser Pairing</h2>");
     if (lan_unlocked) {
       w_printf(
           &w,
-          "<div class=\"msg ok\">Unlocked in this browser for %u s. You can save changes below.</div>",
+          "<div class=\"msg ok\">Paired in this browser for %u s. You can adjust Status Voice and Volume below.</div>",
           (unsigned)status->unlocked_remaining_s);
-    } else {
-      if (status->physical_claim_remaining_s > 0U) {
-        w_puts(&w,
-            "<form method=post action=/claim-unlock>"
-            "<input type=hidden name=csrf value=\"");
-        w_html(&w, csrf_token);
-        w_printf(
-            &w,
-            "\"><button type=submit>Claim physical unlock (%u s left)</button>"
-            "<p class=hint>Button tap detected on the puck. Claim now to unlock this browser for 3 minutes.</p>"
-            "</form>",
-            (unsigned)status->physical_claim_remaining_s);
-      }
-      w_puts(&w,
-          "<form method=post action=/unlock>"
-          "<input type=hidden name=csrf value=\"");
+    } else if (status->claim_is_mine &&
+               status->claim_state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+      w_printf(
+          &w,
+          "<div class=ringbox><div class=ring style=\"%s:%s\"></div>"
+          "<div><b>Confirm on the puck (%u s left)</b><br>"
+          "Check that the LED ring lights <b>%s</b> at <b>%s</b>.</div></div>"
+          "<p class=hint>If the ring matches, keep Mute ON and tap the centre button again to confirm. "
+          "Anything else (sliding Mute OFF, holding a button, or Cancel) cancels.</p>"
+          "<form method=get action=/><button class=sec type=submit>Refresh now</button></form>"
+          "<form method=post action=/claim-cancel><input type=hidden name=csrf value=\"",
+          claim_pos_border_css(status->claim_pattern.position),
+          claim_color_css(status->claim_pattern.color),
+          (unsigned)status->claim_remaining_s,
+          iterate_kit_claim_color_name(status->claim_pattern.color),
+          iterate_kit_claim_position_name(status->claim_pattern.position));
       w_html(&w, csrf_token);
+      w_puts(&w, "\"><button class=sec type=submit>Cancel pairing</button></form>");
+    } else if (status->claim_state == ITERATE_KIT_CLAIM_OPEN) {
       w_puts(&w,
-          "\"><label for=sc>Setup code</label>"
-          "<input id=sc name=setup_code autocomplete=off placeholder=\"xxxx-xxxx-xxxx\" required>"
-          "<button type=submit>Unlock this browser (3 min)</button>"
-          "<p class=hint>Find the code on the card, or slide Mute ON, tap the centre button on the puck, and refresh to claim.</p>"
-          "</form>");
+          "<form method=post action=/claim-request><input type=hidden name=csrf value=\"");
+      w_html(&w, csrf_token);
+      w_printf(
+          &w,
+          "\"><button type=submit>Request pairing pattern (%u s left)</button>"
+          "<p class=hint>Puck tap detected. Tap to display a colour &amp; position on the ring, then tap the puck a second time to confirm.</p>"
+          "</form>",
+          (unsigned)status->claim_remaining_s);
+    } else if (status->claim_state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+      w_printf(
+          &w,
+          "<div class=\"msg err\">Another browser has a pending pairing request (%u s left). "
+          "Do not tap to confirm; slide Mute OFF on the puck to cancel it.</div>",
+          (unsigned)status->claim_remaining_s);
+    } else {
+      w_puts(&w,
+          "<p class=hint>Read-only view. To unlock Status Voice and Volume for this browser: "
+          "slide <b>Mute ON</b>, tap the centre button on the puck, and refresh this page to start visual pairing. "
+          "The card's setup code is never entered on the LAN.</p>"
+          "<form method=get action=/><button class=sec type=submit>Refresh</button></form>");
     }
     w_puts(&w, "</div>");
   }
@@ -766,7 +810,7 @@ size_t iterate_kit_web_render_page(
         "<button type=submit>Save Wi-Fi &amp; Connect</button>"
         "<p class=hint>After connecting, open <b>http://");
     w_html(&w, status->hostname);
-    w_puts(&w, ".local/</b> from your phone on the same Wi-Fi to check status or adjust settings.</p>"
+    w_puts(&w, ".local/</b> from your phone on the same Wi-Fi to view status or adjust volume &amp; voice.</p>"
         "</form>"
         "<form method=get action=/><button class=sec type=submit>Rescan networks</button></form>"
         "</div>");
@@ -823,26 +867,16 @@ size_t iterate_kit_web_render_page(
       "<button type=submit>Save settings</button></form></div>",
       (unsigned)status->volume_percent, (unsigned)status->volume_percent);
 
-  /* --- LAN Mind/Wi-Fi transition & Recovery actions (no secret forms on LAN) --- */
+  /* --- Physical controls reference on LAN (no remote reset/setup/reboot buttons) --- */
   if (!setup_ap) {
-    w_puts(&w, "<div class=card><h2>Wi-Fi, Mind &amp; Recovery</h2>"
-        "<p class=hint>To keep Wi-Fi passwords and Mind refresh tokens off plain-HTTP LAN, connect or replace them in encrypted Setup Mode (WPA2 SoftAP <b>");
-    w_html(&w, status->hostname);
-    w_puts(&w, "</b>).</p>"
-        "<form method=post action=/enter-setup><input type=hidden name=csrf value=\"");
-    w_html(&w, csrf_token);
     w_puts(&w,
-        "\"><button type=submit>Enter Setup Mode (link Mind or change Wi-Fi)</button></form>"
-        "<form method=post action=/reset-wifi><input type=hidden name=csrf value=\"");
-    w_html(&w, csrf_token);
-    w_puts(&w,
-        "\"><button class=warn type=submit>Reset Wi-Fi (keeps mind)</button></form>"
-        "<form method=post action=/reboot><input type=hidden name=csrf value=\"");
-    w_html(&w, csrf_token);
-    w_puts(&w,
-        "\"><button class=sec type=submit>Reboot device</button></form>"
-        "<p class=hint>Physical recovery: hold centre button 5 s (unmuted) to reset Wi-Fi; slide Mute ON and hold 10 s for a full wipe.</p>"
-        "</div>");
+        "<div class=card><h2>Physical Controls</h2>"
+        "<p class=hint>Wi-Fi changes, Mind linking, and resets happen only from the puck itself (never over LAN):</p>"
+        "<ul class=g>"
+        "<li><b>Enter Setup Mode (keeps Wi-Fi &amp; Mind):</b> slide Mute <b>ON</b>, hold centre button <b>3 s</b> (violet blink).</li>"
+        "<li><b>Reset Wi-Fi (keeps Mind):</b> keep Mute <b>OFF</b>, hold centre button <b>5 s</b> (cyan blink).</li>"
+        "<li><b>Full wipe:</b> slide Mute <b>ON</b>, hold centre button <b>10 s</b> (red blink).</li>"
+        "</ul></div>");
   }
 
   w_puts(&w, "</body></html>");

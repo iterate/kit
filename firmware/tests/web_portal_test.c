@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <string.h>
 
-static void parses_cookies_and_enforces_mode_credential_policy(void) {
+static void parses_cookies_and_enforces_mode_action_policy(void) {
   char val[64];
   assert(iterate_kit_web_cookie_get("kit_sid=abc123", "kit_sid", val, sizeof(val)));
   assert(strcmp(val, "abc123") == 0);
@@ -14,33 +14,35 @@ static void parses_cookies_and_enforces_mode_credential_policy(void) {
   assert(val[0] == '\0');
   assert(!iterate_kit_web_cookie_get("kit_sid=toolongvalue", "kit_sid", val, 5U));
 
-  /* Credentials (WIFI and MIND) are allowed ONLY in encrypted SETUP_AP mode. */
+  /* WIFI, MIND, and REBOOT are allowed ONLY in encrypted SETUP_AP mode. */
   assert(iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_WIFI));
   assert(iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_MIND));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_REBOOT));
+
   assert(!iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_WIFI));
   assert(!iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_MIND));
   assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_REBOOT));
+
+  assert(!iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_WIFI));
   assert(!iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_MIND));
+  assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_REBOOT));
 
-  /* Non-secret settings and recovery transitions stay allowed on LAN. */
+  /* Non-secret settings (status voice & volume) are allowed in all modes. */
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_SETTINGS));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_SETTINGS));
   assert(iterate_kit_web_action_allowed(
       ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_SETTINGS));
-  assert(iterate_kit_web_action_allowed(
-      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_ENTER_SETUP));
-  assert(iterate_kit_web_action_allowed(
-      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_RESET_WIFI));
-  assert(iterate_kit_web_action_allowed(
-      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_REBOOT));
-  assert(iterate_kit_web_action_allowed(
-      ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_ENTER_SETUP));
-  assert(!iterate_kit_web_action_allowed(
-      ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_ENTER_SETUP));
 }
 
 static void detects_captive_probes_and_decodes_forms(void) {
@@ -129,10 +131,10 @@ static void applies_wifi_mind_and_settings_forms_safely(void) {
   iterate_kit_web_apply_settings_form(vol_only, strlen(vol_only), &cfg, &presence, &res);
   assert(res.ok && res.apply_volume && res.new_volume == 65U && !res.config_changed && !res.reboot_needed);
 
-  /* Status voice change saves and requests reboot. */
+  /* Status voice change saves without triggering a LAN reboot. */
   const char *voice_form = "status_voice=daisy-bell&volume=80";
   iterate_kit_web_apply_settings_form(voice_form, strlen(voice_form), &cfg, &presence, &res);
-  assert(res.ok && res.config_changed && res.reboot_needed && res.apply_volume && res.new_volume == 80U);
+  assert(res.ok && res.config_changed && !res.reboot_needed && res.apply_volume && res.new_volume == 80U);
   assert(cfg.status_voice == ITERATE_KIT_STATUS_VOICE_DAISY_BELL);
 
   /* Invalid volume rejected. */
@@ -141,7 +143,7 @@ static void applies_wifi_mind_and_settings_forms_safely(void) {
   assert(!res.ok);
 }
 
-static void rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_lan(void) {
+static void rendered_html_and_json_keep_lan_minimal_and_show_pattern_only_to_claimer(void) {
   struct iterate_kit_configuration cfg;
   struct iterate_kit_configuration_presence presence = {true, true, true};
   struct iterate_kit_portal_status status;
@@ -171,28 +173,47 @@ static void rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_l
   status.wifi_rssi = -58;
   memcpy(status.connection_state, "ready", sizeof("ready"));
   status.volume_percent = 75U;
-  status.physical_claim_remaining_s = 25U;
+
+  /* Pending claim belonging to THIS browser: shows visual pattern & auto-refresh. */
+  status.claim_state = ITERATE_KIT_CLAIM_PENDING_CONFIRM;
+  status.claim_remaining_s = 22U;
+  status.claim_is_mine = true;
+  status.claim_pattern.color = ITERATE_KIT_CLAIM_COLOR_MAGENTA;
+  status.claim_pattern.position = ITERATE_KIT_CLAIM_POS_RIGHT;
 
   const size_t html_len = iterate_kit_web_render_page(
       &cfg, &presence, &status, "0123456789abcdef0123456789abcdef", html, sizeof(html));
   assert(html_len > 500U);
   assert(strstr(html, "iterate-a1b2.local") != NULL);
   assert(strstr(html, "-58 dBm (Good)") != NULL);
-  assert(strstr(html, "003114-2026-11-25-abcdef0") != NULL);
-  assert(strstr(html, "https://iterate.example.com") != NULL);
-  /* Physical claim button shown when armed; LAN has Enter Setup Mode instead of secret inputs. */
-  assert(strstr(html, "action=/claim-unlock") != NULL);
-  assert(strstr(html, "action=/enter-setup") != NULL);
-  assert(strstr(html, "action=/mind") == NULL);
+  assert(strstr(html, "Magenta") != NULL);
+  assert(strstr(html, "Right (3 o&#39;clock)") != NULL || strstr(html, "Right (3 o'clock)") != NULL);
+  assert(strstr(html, "action=/claim-cancel") != NULL);
+  assert(strstr(html, "http-equiv=refresh") != NULL);
+  /* LAN page has NO setup-code unlock, NO credential forms, NO reset/setup/reboot buttons! */
+  assert(strstr(html, "action=/unlock") == NULL);
+  assert(strstr(html, "name=setup_code") == NULL);
   assert(strstr(html, "action=/wifi") == NULL);
+  assert(strstr(html, "action=/mind") == NULL);
+  assert(strstr(html, "action=/enter-setup") == NULL);
+  assert(strstr(html, "action=/reset-wifi") == NULL);
+  assert(strstr(html, "action=/reboot") == NULL);
   assert(strstr(html, "name=refresh_token") == NULL);
   assert(strstr(html, "name=password") == NULL);
-  /* XSS escaped. */
+  /* XSS escaped & secrets redacted. */
   assert(strstr(html, "<b>Evil") == NULL);
   assert(strstr(html, "&lt;b&gt;Evil&quot;Net&lt;/b&gt;") != NULL);
-  /* Secrets NEVER appear in HTML. */
   assert(strstr(html, "SUPER_SECRET_WIFI_PASS_123") == NULL);
   assert(strstr(html, "NEVER_SHOW_THIS_TOKEN") == NULL);
+
+  /* Another browser viewing LAN while claim is pending NEVER sees the pattern! */
+  status.claim_is_mine = false;
+  const size_t other_len = iterate_kit_web_render_page(
+      &cfg, &presence, &status, "fedcba9876543210fedcba9876543210", html, sizeof(html));
+  assert(other_len > 500U);
+  assert(strstr(html, "Another browser has a pending pairing request") != NULL);
+  assert(strstr(html, "Magenta") == NULL);
+  assert(strstr(html, "Right (3 o") == NULL);
 
   /* JSON also never leaks secrets or CSRF. */
   const size_t json_len = iterate_kit_web_render_status_json(
@@ -204,7 +225,7 @@ static void rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_l
   assert(strstr(json, "NEVER_SHOW_THIS_TOKEN") == NULL);
   assert(strstr(json, "0123456789abcdef0123456789abcdef") == NULL);
 
-  /* Setup AP page renders scanned networks AND both Wi-Fi and Mind forms (over WPA2). */
+  /* Setup AP page renders scanned networks AND Wi-Fi + Mind + Exit forms (over WPA2). */
   memset(&scans, 0, sizeof(scans));
   memcpy(scans[0].ssid, "CoffeeShop", sizeof("CoffeeShop"));
   scans[0].rssi = -62;
@@ -225,9 +246,9 @@ static void rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_l
 }
 
 int main(void) {
-  parses_cookies_and_enforces_mode_credential_policy();
+  parses_cookies_and_enforces_mode_action_policy();
   detects_captive_probes_and_decodes_forms();
   applies_wifi_mind_and_settings_forms_safely();
-  rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_lan();
+  rendered_html_and_json_keep_lan_minimal_and_show_pattern_only_to_claimer();
   return 0;
 }

@@ -62,10 +62,17 @@ enum havpe_gesture_event havpe_reset_gesture_step(
           }
           return HAVPE_GESTURE_NONE;
         }
-        /* Muted holds: short tap unlocks LAN, 10..15 s triggers full wipe. */
+        /* Muted holds:
+         *  < 1.5 s    -> LAN pairing tap (open or confirm visual claim)
+         *  3..6 s     -> Enter Setup Mode once (violet, keeps Wi-Fi & Mind)
+         *  6..10 s    -> Safe dead-zone (red progress arc; release does nothing)
+         *  10..15 s   -> Full wipe (red) */
         if (held_ms < HAVPE_GESTURE_SHOW_PROGRESS_MS) {
-          state->unlock_flash_until_ms = now_ms + HAVPE_GESTURE_UNLOCK_FLASH_MS;
-          return HAVPE_GESTURE_LAN_UNLOCK;
+          return HAVPE_GESTURE_PAIR_TAP;
+        }
+        if (held_ms >= HAVPE_GESTURE_SETUP_MODE_MS &&
+            held_ms < HAVPE_GESTURE_SETUP_MODE_MAX_MS) {
+          return HAVPE_GESTURE_ENTER_SETUP;
         }
         if (held_ms >= HAVPE_GESTURE_FULL_WIPE_MS &&
             held_ms < HAVPE_GESTURE_FULL_WIPE_MAX_MS) {
@@ -102,10 +109,26 @@ enum havpe_gesture_event havpe_reset_gesture_step(
   return HAVPE_GESTURE_NONE;
 }
 
+void havpe_reset_gesture_trigger_unlock_flash(
+    struct havpe_reset_gesture *state, uint64_t now_ms) {
+  if (state == NULL) return;
+  state->unlock_flash_until_ms = now_ms + (uint64_t)HAVPE_GESTURE_UNLOCK_FLASH_MS;
+}
+
 bool havpe_reset_gesture_take_cancel_call(struct havpe_reset_gesture *state) {
   if (state == NULL || !state->cancel_call_pending) return false;
   state->cancel_call_pending = false;
   return true;
+}
+
+static uint8_t scale_progress_leds(uint64_t elapsed, uint64_t span) {
+  if (span == 0U) return ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
+  uint8_t lit = (uint8_t)((elapsed * ITERATE_KIT_CONVERSATION_LIGHT_COUNT) / span);
+  if (lit == 0U) lit = 1U;
+  if (lit > ITERATE_KIT_CONVERSATION_LIGHT_COUNT) {
+    lit = ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
+  }
+  return lit;
 }
 
 void havpe_reset_gesture_visual(
@@ -127,32 +150,42 @@ void havpe_reset_gesture_visual(
         if (progress_leds != NULL) *progress_leds = ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
         return;
       }
-      const uint64_t span = HAVPE_GESTURE_WIFI_RESET_MS - HAVPE_GESTURE_SHOW_PROGRESS_MS;
-      uint8_t lit = (uint8_t)(((held_ms - HAVPE_GESTURE_SHOW_PROGRESS_MS) *
-          ITERATE_KIT_CONVERSATION_LIGHT_COUNT) / span);
-      if (lit == 0U) lit = 1U;
-      if (lit > ITERATE_KIT_CONVERSATION_LIGHT_COUNT) {
-        lit = ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
-      }
       if (visual != NULL) *visual = HAVPE_VISUAL_WIFI_RESET_PROGRESS;
-      if (progress_leds != NULL) *progress_leds = lit;
+      if (progress_leds != NULL) {
+        *progress_leds = scale_progress_leds(
+            held_ms - HAVPE_GESTURE_SHOW_PROGRESS_MS,
+            HAVPE_GESTURE_WIFI_RESET_MS - HAVPE_GESTURE_SHOW_PROGRESS_MS);
+      }
       return;
     }
 
-    if (held_ms >= HAVPE_GESTURE_FULL_WIPE_MS) {
-      if (visual != NULL) *visual = HAVPE_VISUAL_FULL_WIPE_ARMED;
+    /* Muted hold timeline: 1.5..3 s violet fill, 3..6 s violet blink (Setup Mode),
+     * 6..10 s red fill (dead-zone warning), 10..15 s red blink (Full Wipe). */
+    if (held_ms < HAVPE_GESTURE_SETUP_MODE_MS) {
+      if (visual != NULL) *visual = HAVPE_VISUAL_SETUP_MODE_PROGRESS;
+      if (progress_leds != NULL) {
+        *progress_leds = scale_progress_leds(
+            held_ms - HAVPE_GESTURE_SHOW_PROGRESS_MS,
+            HAVPE_GESTURE_SETUP_MODE_MS - HAVPE_GESTURE_SHOW_PROGRESS_MS);
+      }
+      return;
+    }
+    if (held_ms < HAVPE_GESTURE_SETUP_MODE_MAX_MS) {
+      if (visual != NULL) *visual = HAVPE_VISUAL_SETUP_MODE_ARMED;
       if (progress_leds != NULL) *progress_leds = ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
       return;
     }
-    const uint64_t span = HAVPE_GESTURE_FULL_WIPE_MS - HAVPE_GESTURE_SHOW_PROGRESS_MS;
-    uint8_t lit = (uint8_t)(((held_ms - HAVPE_GESTURE_SHOW_PROGRESS_MS) *
-        ITERATE_KIT_CONVERSATION_LIGHT_COUNT) / span);
-    if (lit == 0U) lit = 1U;
-    if (lit > ITERATE_KIT_CONVERSATION_LIGHT_COUNT) {
-      lit = ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
+    if (held_ms < HAVPE_GESTURE_FULL_WIPE_MS) {
+      if (visual != NULL) *visual = HAVPE_VISUAL_FULL_WIPE_PROGRESS;
+      if (progress_leds != NULL) {
+        *progress_leds = scale_progress_leds(
+            held_ms - HAVPE_GESTURE_SETUP_MODE_MAX_MS,
+            HAVPE_GESTURE_FULL_WIPE_MS - HAVPE_GESTURE_SETUP_MODE_MAX_MS);
+      }
+      return;
     }
-    if (visual != NULL) *visual = HAVPE_VISUAL_FULL_WIPE_PROGRESS;
-    if (progress_leds != NULL) *progress_leds = lit;
+    if (visual != NULL) *visual = HAVPE_VISUAL_FULL_WIPE_ARMED;
+    if (progress_leds != NULL) *progress_leds = ITERATE_KIT_CONVERSATION_LIGHT_COUNT;
     return;
   }
 
@@ -238,6 +271,21 @@ void havpe_ring_render_gesture(
       for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) pixels[i] = c;
       return;
     }
+    case HAVPE_VISUAL_SETUP_MODE_PROGRESS:
+      for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) {
+        pixels[i] = i < progress_leds
+            ? (struct iterate_kit_rgb8){26U, 0U, 38U}
+            : (struct iterate_kit_rgb8){3U, 0U, 4U};
+      }
+      return;
+    case HAVPE_VISUAL_SETUP_MODE_ARMED: {
+      const bool high = ((now_ms / 180U) & 1U) == 0U;
+      const struct iterate_kit_rgb8 c = high
+          ? (struct iterate_kit_rgb8){44U, 0U, 56U}
+          : (struct iterate_kit_rgb8){8U, 0U, 12U};
+      for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) pixels[i] = c;
+      return;
+    }
     case HAVPE_VISUAL_FULL_WIPE_PROGRESS:
       for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) {
         pixels[i] = i < progress_leds
@@ -259,6 +307,58 @@ void havpe_ring_render_gesture(
       for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) pixels[i] = c;
       return;
     }
+  }
+}
+
+void havpe_ring_render_claim_open(
+    uint32_t now_ms,
+    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]) {
+  if (pixels == NULL) return;
+  const uint8_t level = triangle_wave(now_ms, 1200U, 4U, 16U);
+  const struct iterate_kit_rgb8 c = {level, level, level};
+  for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) {
+    pixels[i] = c;
+  }
+}
+
+void havpe_ring_render_claim_pattern(
+    enum iterate_kit_claim_color color,
+    enum iterate_kit_claim_position position,
+    uint32_t now_ms,
+    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]) {
+  static const uint8_t quadrants[4][3] = {
+    {11U, 0U, 1U},  /* Top (12 o'clock) */
+    {2U, 3U, 4U},   /* Right (3 o'clock) */
+    {5U, 6U, 7U},   /* Bottom (6 o'clock) */
+    {8U, 9U, 10U},  /* Left (9 o'clock) */
+  };
+  if (pixels == NULL) return;
+  memset(pixels, 0, sizeof(*pixels) * ITERATE_KIT_CONVERSATION_LIGHT_COUNT);
+
+  const uint8_t scale = triangle_wave(now_ms, 1000U, 60U, 100U);
+  struct iterate_kit_rgb8 base = {0U, 8U, 48U};
+  switch (color) {
+    case ITERATE_KIT_CLAIM_COLOR_BLUE:
+      base = (struct iterate_kit_rgb8){0U, 8U, 48U};
+      break;
+    case ITERATE_KIT_CLAIM_COLOR_GREEN:
+      base = (struct iterate_kit_rgb8){0U, 44U, 6U};
+      break;
+    case ITERATE_KIT_CLAIM_COLOR_AMBER:
+      base = (struct iterate_kit_rgb8){48U, 28U, 0U};
+      break;
+    case ITERATE_KIT_CLAIM_COLOR_MAGENTA:
+      base = (struct iterate_kit_rgb8){44U, 0U, 36U};
+      break;
+  }
+  const struct iterate_kit_rgb8 lit = {
+    (uint8_t)(((uint32_t)base.red * scale) / 100U),
+    (uint8_t)(((uint32_t)base.green * scale) / 100U),
+    (uint8_t)(((uint32_t)base.blue * scale) / 100U),
+  };
+  const uint8_t q = (uint8_t)position < 4U ? (uint8_t)position : 0U;
+  for (uint8_t k = 0U; k < 3U; ++k) {
+    pixels[quadrants[q][k]] = lit;
   }
 }
 

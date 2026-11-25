@@ -48,7 +48,6 @@ static void derives_identity_setup_code_and_qr(void) {
   assert(strlen(code) == 14U && code[4] == '-' && code[9] == '-');
   assert(strcmp(code, "0123-abcd-wxyz") == 0);
   assert(iterate_kit_setup_code_equal(code, code));
-  /* Case, hyphens and spaces are tolerated when typing the code. */
   assert(iterate_kit_setup_code_equal("0123ABCDWXYZ", code));
   assert(iterate_kit_setup_code_equal(" 0123 - abcd - wxyz ", code));
   assert(!iterate_kit_setup_code_equal("0123-abcd-wxy2", code));
@@ -62,23 +61,22 @@ static void derives_identity_setup_code_and_qr(void) {
 
   assert(iterate_kit_wifi_qr_format("iterate-09af", code, qr, sizeof(qr)));
   assert(strcmp(qr, "WIFI:T:WPA;S:iterate-09af;P:0123-abcd-wxyz;;") == 0);
-  /* Escapes special QR characters. */
   assert(iterate_kit_wifi_qr_format("a;b:c\\d\"e,f", "p;w:1", qr, sizeof(qr)));
   assert(strcmp(qr, "WIFI:T:WPA;S:a\\;b\\:c\\\\d\\\"e\\,f;P:p\\;w\\:1;;") == 0);
-  /* Open network uses nopass. */
   assert(iterate_kit_wifi_qr_format("open-net", "", qr, sizeof(qr)));
   assert(strcmp(qr, "WIFI:T:nopass;S:open-net;;") == 0);
 }
 
-static void enforces_per_client_sessions_csrf_rotation_and_no_unauthenticated_extension(void) {
+static void enforces_visual_claim_confirmation_and_client_isolation(void) {
   struct iterate_kit_portal_guard guard;
   uint8_t s1[16], c1[16], s2[16], c2[16], rs1[16], rc1[16], rs2[16], rc2[16];
   char sid_a[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   char csrf_a[ITERATE_KIT_CSRF_TOKEN_CAPACITY];
   char sid_b[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   char csrf_b[ITERATE_KIT_CSRF_TOKEN_CAPACITY];
-  char new_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  char dummy_csrf[ITERATE_KIT_CSRF_TOKEN_CAPACITY];
+  char rot_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
+  char rot_sid_b[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
+  struct iterate_kit_claim_pattern pat_a, pat_ring, pat_check;
   bool created = false;
 
   fill_seq(s1, 0x10U);
@@ -91,14 +89,15 @@ static void enforces_per_client_sessions_csrf_rotation_and_no_unauthenticated_ex
   fill_seq(rc2, 0x80U);
 
   /* Setup AP mode: WPA2 authenticates link; per-client session + CSRF still required. */
-  iterate_kit_portal_guard_init(&guard, "a1b2", "k7m4-9p2x-3v8q", true);
+  iterate_kit_portal_guard_init(&guard, "a1b2", true);
   assert(iterate_kit_portal_guard_host_allowed(&guard, "192.168.4.1", "192.168.4.1"));
   assert(iterate_kit_portal_guard_host_allowed(&guard, "ITERATE-A1B2.local:80", "192.168.4.1"));
   assert(!iterate_kit_portal_guard_host_allowed(&guard, "evil.example", "192.168.4.1"));
   assert(!iterate_kit_portal_guard_host_allowed(&guard, "192.168.4.1:8080", "192.168.4.1"));
   assert(iterate_kit_portal_guard_ensure_session(
-      &guard, "", s1, c1, 1000U, sid_a, csrf_a, &created));
-  assert(created);
+      &guard, "", s1, c1, 1000U, sid_a, csrf_a, &created) && created);
+  assert(iterate_kit_portal_guard_session_exists(&guard, sid_a));
+  assert(!iterate_kit_portal_guard_session_exists(&guard, "nonexistent"));
   assert(iterate_kit_portal_guard_authorize_post(&guard, "", csrf_a, 1000U) ==
          ITERATE_KIT_PORTAL_AUTH_NO_SESSION);
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, "wrong", 1000U) ==
@@ -106,8 +105,8 @@ static void enforces_per_client_sessions_csrf_rotation_and_no_unauthenticated_ex
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 1000U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
 
-  /* LAN mode: two distinct clients get distinct cookies and distinct CSRF tokens. */
-  iterate_kit_portal_guard_init(&guard, "a1b2", "k7m4-9p2x-3v8q", false);
+  /* LAN mode: two browsers get distinct cookies and distinct CSRF tokens. */
+  iterate_kit_portal_guard_init(&guard, "a1b2", false);
   assert(!iterate_kit_portal_guard_host_allowed(&guard, "192.168.4.1", "192.168.1.42"));
   assert(iterate_kit_portal_guard_host_allowed(&guard, "192.168.1.42", "192.168.1.42"));
   assert(iterate_kit_portal_guard_host_allowed(&guard, "iterate-a1b2.local.", "192.168.1.42"));
@@ -119,161 +118,133 @@ static void enforces_per_client_sessions_csrf_rotation_and_no_unauthenticated_ex
   assert(strcmp(sid_a, sid_b) != 0);
   assert(strcmp(csrf_a, csrf_b) != 0);
 
-  /* Client A cannot use Client B's CSRF token and vice versa. */
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_b, 1000U) ==
-         ITERATE_KIT_PORTAL_AUTH_BAD_CSRF);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 1000U) ==
+  /* Before physical Tap 1, requesting a claim fails (cannot light up the ring). */
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_a, csrf_a, 0x07U, rs1, rc1, 1000U, rot_sid, &pat_a) ==
+         ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
+  assert(!iterate_kit_portal_guard_active_claim_pattern(&guard, 1000U, &pat_ring));
+
+  /* Tap 1 opens a 30 s window; still no write access for anyone. */
+  iterate_kit_portal_guard_open_claim(&guard, 2000U);
+  assert(iterate_kit_portal_guard_claim_state(&guard, 2000U) == ITERATE_KIT_CLAIM_OPEN);
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 2000U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
-  /* 4 free failures, 5th triggers 5s lockout. */
-  for (int i = 0; i < 5; ++i) {
-    assert(iterate_kit_portal_guard_unlock_with_code(
-               &guard, sid_a, csrf_a, "2222-2222-2222", rs1, rc1, 1000U, new_sid) ==
-           ITERATE_KIT_PORTAL_AUTH_BAD_CODE);
-  }
-  assert(iterate_kit_portal_guard_unlock_with_code(
-             &guard, sid_a, csrf_a, "k7m4-9p2x-3v8q", rs1, rc1, 5999U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_LOCKED_OUT);
-
-  /* After lockout, Client A unlocks with setup code -> session & CSRF rotate. */
-  assert(iterate_kit_portal_guard_unlock_with_code(
-             &guard, sid_a, csrf_a, "K7M49P2X3V8Q", rs1, rc1, 6000U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_OK);
-  assert(strcmp(new_sid, sid_a) != 0);
-  /* Old session cookie and old CSRF are invalid after rotation. */
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 6000U) ==
-         ITERATE_KIT_PORTAL_AUTH_NO_SESSION);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, new_sid, csrf_a, 6000U) ==
-         ITERATE_KIT_PORTAL_AUTH_BAD_CSRF);
-
-  /* Client A fetches its rotated CSRF on the redirected GET /. */
+  /* Attacker (Client B) races Tap 1 and claims first -> gets PENDING_CONFIRM pattern,
+   * but STILL HAS ZERO WRITE ACCESS! */
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_b, csrf_b, 0x06U /* AMBER + RIGHT */, rs2, rc2, 3000U,
+             rot_sid_b, &pat_a) == ITERATE_KIT_PORTAL_AUTH_OK);
+  assert(pat_a.color == ITERATE_KIT_CLAIM_COLOR_AMBER);
+  assert(pat_a.position == ITERATE_KIT_CLAIM_POS_RIGHT);
+  /* Client B fetches its rotated CSRF after redirect. */
   assert(iterate_kit_portal_guard_ensure_session(
-      &guard, new_sid, s1, c1, 6100U, sid_a, csrf_a, &created) && !created);
-  assert(strcmp(sid_a, new_sid) == 0);
-  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 6100U));
-  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_a, 6000U) == 180U);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 6100U) ==
-         ITERATE_KIT_PORTAL_AUTH_OK);
-
-  /* Client B is STILL LOCKED while Client A is unlocked, and cannot piggyback! */
-  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 6100U));
-  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_b, 6100U) == 0U);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_b, csrf_b, 6100U) ==
+      &guard, rot_sid_b, s2, c2, 3100U, sid_b, csrf_b, &created) && !created);
+  /* CRITICAL RULE: an unconfirmed claim gives NO write access! */
+  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 3100U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_b, csrf_b, 3100U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_b, csrf_a, 6100U) ==
-         ITERATE_KIT_PORTAL_AUTH_BAD_CSRF);
+  /* Ring shows B's pattern; owner (Client A) sees CLAIM_BUSY and NEVER sees B's pattern. */
+  assert(iterate_kit_portal_guard_active_claim_pattern(&guard, 3100U, &pat_ring));
+  assert(pat_ring.color == ITERATE_KIT_CLAIM_COLOR_AMBER &&
+         pat_ring.position == ITERATE_KIT_CLAIM_POS_RIGHT);
+  assert(iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_b, 3100U, &pat_check));
+  assert(!iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_a, 3100U, &pat_check));
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_a, csrf_a, 0x01U, rs1, rc1, 3200U, rot_sid, &pat_a) ==
+         ITERATE_KIT_PORTAL_AUTH_CLAIM_BUSY);
 
-  /* Nothing extends Client A's window without re-entering the valid setup code. */
-  assert(iterate_kit_portal_guard_unlock_with_code(
-             &guard, sid_a, csrf_a, "", rs2, rc2, 100000U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_REQUIRED);
-  assert(iterate_kit_portal_guard_unlock_with_code(
-             &guard, sid_a, csrf_a, "9999-9999-9999", rs2, rc2, 100000U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_BAD_CODE);
-  /* Ordinary POST at t=150000 does NOT extend the 186000 deadline. */
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 150000U) ==
-         ITERATE_KIT_PORTAL_AUTH_OK);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 185999U) ==
-         ITERATE_KIT_PORTAL_AUTH_OK);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 186000U) ==
+  /* Owner sees mismatched ring and flips Mute OFF -> cancels attacker's claim cleanly. */
+  iterate_kit_portal_guard_cancel_claim(&guard);
+  assert(iterate_kit_portal_guard_claim_state(&guard, 3300U) == ITERATE_KIT_CLAIM_NONE);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, 3300U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_b, csrf_b, 3300U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
-  /* Unauthenticated GET spam cannot evict an actively unlocked session. */
-  assert(iterate_kit_portal_guard_unlock_with_code(
-             &guard, sid_a, csrf_a, "k7m4-9p2x-3v8q", rs2, rc2, 200000U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_OK);
+  /* Unconfirmed claim also expires cleanly after 30 s with ZERO write access. */
+  iterate_kit_portal_guard_open_claim(&guard, 10000U);
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_a, csrf_a, 0x0dU /* GREEN + LEFT */, rs1, rc1, 11000U,
+             rot_sid, &pat_a) == ITERATE_KIT_PORTAL_AUTH_OK);
   assert(iterate_kit_portal_guard_ensure_session(
-      &guard, new_sid, s1, c1, 200010U, sid_a, csrf_a, &created) && !created);
-  for (uint8_t i = 0U; i < 10U; ++i) {
+      &guard, rot_sid, s1, c1, 11100U, sid_a, csrf_a, &created) && !created);
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 40999U) ==
+         ITERATE_KIT_PORTAL_AUTH_REQUIRED);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, 41000U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 41000U) ==
+         ITERATE_KIT_PORTAL_AUTH_REQUIRED);
+
+  /* Owner's browser-initiated cancel works only for the claiming browser. */
+  uint8_t rs3[16], rc3[16];
+  fill_seq(rs3, 0xb0U);
+  fill_seq(rc3, 0xc0U);
+  iterate_kit_portal_guard_open_claim(&guard, 50000U);
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_a, csrf_a, 0x03U /* MAGENTA + TOP */, rs3, rc3, 51000U,
+             rot_sid, &pat_a) == ITERATE_KIT_PORTAL_AUTH_OK);
+  assert(iterate_kit_portal_guard_ensure_session(
+      &guard, rot_sid, s1, c1, 51100U, sid_a, csrf_a, &created) && !created);
+  assert(iterate_kit_portal_guard_cancel_claim_by_session(&guard, sid_b, csrf_b, 51200U) ==
+         ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
+  assert(iterate_kit_portal_guard_cancel_claim_by_session(&guard, sid_a, csrf_a, 51200U) ==
+         ITERATE_KIT_PORTAL_AUTH_OK);
+  assert(iterate_kit_portal_guard_claim_state(&guard, 51200U) == ITERATE_KIT_CLAIM_NONE);
+
+  /* Full 2-tap visual pairing: Tap 1 -> Client A requests -> ring shows pattern ->
+   * Tap 2 confirms -> ONLY Client A gets 3-min write access (never extended on POST). */
+  iterate_kit_portal_guard_open_claim(&guard, 60000U);
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_a, csrf_a, 0x07U /* MAGENTA + RIGHT */, rs1, rc1, 61000U,
+             rot_sid, &pat_a) == ITERATE_KIT_PORTAL_AUTH_OK);
+  assert(pat_a.color == ITERATE_KIT_CLAIM_COLOR_MAGENTA &&
+         pat_a.position == ITERATE_KIT_CLAIM_POS_RIGHT);
+  assert(iterate_kit_portal_guard_ensure_session(
+      &guard, rot_sid, s1, c1, 61100U, sid_a, csrf_a, &created) && !created);
+  /* Unauthenticated GET spam cannot evict the pending-claim session before Tap 2. */
+  for (uint8_t i = 0U; i < 8U; ++i) {
     uint8_t sp_s[16], sp_c[16];
     char sp_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
+    char sp_csrf[ITERATE_KIT_CSRF_TOKEN_CAPACITY];
     fill_seq(sp_s, (uint8_t)(0x90U + i));
     fill_seq(sp_c, (uint8_t)(0xa0U + i));
     assert(iterate_kit_portal_guard_ensure_session(
-        &guard, "", sp_s, sp_c, 200100U + i, sp_sid, dummy_csrf, &created) && created);
+        &guard, "", sp_s, sp_c, 61200U + i, sp_sid, sp_csrf, &created) && created);
   }
-  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 200500U));
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 200500U) ==
+  assert(iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_a, 62000U, &pat_check));
+  /* Still locked before Tap 2. */
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 62000U) ==
+         ITERATE_KIT_PORTAL_AUTH_REQUIRED);
+
+  /* Tap 2 confirms! */
+  assert(iterate_kit_portal_guard_confirm_claim(&guard, 63000U));
+  assert(iterate_kit_portal_guard_claim_state(&guard, 63000U) == ITERATE_KIT_CLAIM_NONE);
+  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 63000U));
+  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_a, 63000U) == 180U);
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 63000U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
-}
-
-static void enforces_one_time_physical_claim_and_write_disable_lock(void) {
-  struct iterate_kit_portal_guard guard;
-  uint8_t s1[16], c1[16], s2[16], c2[16], rs1[16], rc1[16], rs2[16], rc2[16];
-  char sid_a[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  char csrf_a[ITERATE_KIT_CSRF_TOKEN_CAPACITY];
-  char sid_b[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  char csrf_b[ITERATE_KIT_CSRF_TOKEN_CAPACITY];
-  char new_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  bool created = false;
-
-  fill_seq(s1, 0x01U);
-  fill_seq(c1, 0x11U);
-  fill_seq(s2, 0x21U);
-  fill_seq(c2, 0x31U);
-  fill_seq(rs1, 0x41U);
-  fill_seq(rc1, 0x51U);
-  fill_seq(rs2, 0x61U);
-  fill_seq(rc2, 0x71U);
-
-  iterate_kit_portal_guard_init(&guard, "a1b2", "k7m4-9p2x-3v8q", false);
-  assert(iterate_kit_portal_guard_ensure_session(
-      &guard, "", s1, c1, 1000U, sid_a, csrf_a, &created) && created);
-  assert(iterate_kit_portal_guard_ensure_session(
-      &guard, "", s2, c2, 1000U, sid_b, csrf_b, &created) && created);
-
-  /* Claim fails before physical button tap. */
-  assert(iterate_kit_portal_guard_claim_physical_unlock(
-             &guard, sid_a, csrf_a, rs1, rc1, 1000U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
-
-  /* Physical tap arms a 30 s claim window — does NOT unlock any client yet! */
-  iterate_kit_portal_guard_arm_physical_claim(&guard, 2000U);
-  assert(iterate_kit_portal_guard_physical_claim_remaining_s(&guard, 2000U) == 30U);
-  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 2000U));
-  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 2000U));
-
-  /* If unclaimed for 30 s, the claim expires. */
-  assert(iterate_kit_portal_guard_physical_claim_remaining_s(&guard, 32000U) == 0U);
-  assert(iterate_kit_portal_guard_claim_physical_unlock(
-             &guard, sid_a, csrf_a, rs1, rc1, 32000U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
-
-  /* Arm again -> Client A claims -> exclusive 3-min unlock for A; B gets NO_CLAIM. */
-  char new_sid_b[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  iterate_kit_portal_guard_arm_physical_claim(&guard, 40000U);
-  assert(iterate_kit_portal_guard_claim_physical_unlock(
-             &guard, sid_a, csrf_a, rs1, rc1, 45000U, new_sid) ==
+  /* Other browser is still locked. */
+  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 63000U));
+  /* Ordinary POSTs do not extend the 180 s deadline. */
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 242999U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
-  assert(iterate_kit_portal_guard_physical_claim_remaining_s(&guard, 45000U) == 0U);
-  assert(iterate_kit_portal_guard_claim_physical_unlock(
-             &guard, sid_b, csrf_b, rs2, rc2, 45001U, new_sid_b) ==
-         ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
-  assert(new_sid_b[0] == '\0');
-  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 45001U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 243000U) ==
+         ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
-  assert(iterate_kit_portal_guard_ensure_session(
-      &guard, new_sid, s1, c1, 45100U, sid_a, csrf_a, &created) && !created);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 45100U) ==
-         ITERATE_KIT_PORTAL_AUTH_OK);
-
-  /* Disabling writes (before physical reset/wipe) rejects ALL writes, unlocks, and claims. */
+  /* Disabling writes cancels any active claim and rejects all POSTs & claims. */
+  iterate_kit_portal_guard_open_claim(&guard, 300000U);
   iterate_kit_portal_guard_disable_writes(&guard);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 45200U) ==
+  assert(iterate_kit_portal_guard_writes_disabled(&guard));
+  assert(iterate_kit_portal_guard_claim_state(&guard, 300000U) == ITERATE_KIT_CLAIM_NONE);
+  assert(iterate_kit_portal_guard_request_claim(
+             &guard, sid_a, csrf_a, 0x01U, rs2, rc2, 300000U, rot_sid, &pat_a) ==
          ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED);
-  assert(iterate_kit_portal_guard_unlock_with_code(
-             &guard, sid_b, csrf_b, "k7m4-9p2x-3v8q", rs2, rc2, 45200U, new_sid) ==
-         ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED);
-  iterate_kit_portal_guard_arm_physical_claim(&guard, 45200U);
-  assert(iterate_kit_portal_guard_claim_physical_unlock(
-             &guard, sid_b, csrf_b, rs2, rc2, 45200U, new_sid) ==
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 300000U) ==
          ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED);
 }
 
 int main(void) {
   selects_boot_mode_from_configuration_presence();
   derives_identity_setup_code_and_qr();
-  enforces_per_client_sessions_csrf_rotation_and_no_unauthenticated_extension();
-  enforces_one_time_physical_claim_and_write_disable_lock();
+  enforces_visual_claim_confirmation_and_client_isolation();
   return 0;
 }

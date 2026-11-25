@@ -39,7 +39,12 @@ enum {
   HAVPE_MUTE_GPIO = 3,
   HTML_BUFFER_BYTES = 16384,
   JSON_BUFFER_BYTES = 1024,
-  POST_BODY_MAX_BYTES = 1536,
+  /* Per-route request body caps (strictly bounded, never megabytes). */
+  POST_BODY_TINY_MAX = 128,      /* /claim-request, /claim-cancel, /reboot (CSRF only) */
+  POST_BODY_SETTINGS_MAX = 256,  /* /settings (CSRF + status_voice + volume) */
+  POST_BODY_WIFI_MAX = 512,      /* /wifi (Setup AP only) */
+  POST_BODY_MIND_MAX = 1024,     /* /mind (Setup AP only) */
+  POST_BODY_DEADLINE_MS = 2000,  /* Hard wall-clock deadline to receive any POST body */
   COOKIE_HEADER_MAX_BYTES = 512,
   SET_COOKIE_MAX_BYTES = 128,
   REBOOT_GRACE_MS = 700,
@@ -48,19 +53,29 @@ enum {
 
 static const uint64_t SETUP_ONCE_MAGIC = UINT64_C(0x4954455253455455);
 
-/* One-boot RTC flag set by `POST /enter-setup` on LAN to enter WPA2 Setup Mode
- * once without erasing saved Wi-Fi or Mind credentials. Valid only across a
- * software restart (`ESP_RST_SW`) and cleared immediately on boot. */
+/* One-boot RTC flag set by the physical Enter Setup Mode gesture (Mute ON +
+ * hold 3 s) to enter WPA2 Setup Mode once without erasing saved Wi-Fi or Mind
+ * credentials. Valid only across a software restart (`ESP_RST_SW`) and cleared
+ * immediately on boot. */
 RTC_NOINIT_ATTR static struct {
   uint64_t magic;
   uint64_t inv_magic;
 } setup_once_rtc;
 
-/* PSRAM-resident page buffers so the HTTP server never pressures internal heap. */
+/* PSRAM-resident page buffers accessed exclusively by the single httpd task. */
 EXT_RAM_BSS_ATTR static char html_buffer[HTML_BUFFER_BYTES];
 EXT_RAM_BSS_ATTR static char json_buffer[JSON_BUFFER_BYTES];
 
+/* Lock-free latch set immediately when a physical reset/wipe/setup gesture
+ * fires so any in-flight `read_post_body()` aborts without waiting for timeout. */
+static bool portal_writes_latched;
+
 static struct {
+  /*
+   * LOCKING RULE: `portal.lock` protects in-memory state and flash writes/erases.
+   * It is NEVER held across network I/O (`httpd_req_recv` or `httpd_resp_send`),
+   * so a stalled TCP client can NEVER block a physical reset, wipe, or gesture.
+   */
   SemaphoreHandle_t lock;
   struct iterate_kit_configuration config;
   struct iterate_kit_configuration_presence presence;
@@ -69,6 +84,8 @@ static struct {
   bool rf_entropy_ready;
   char short_id[ITERATE_KIT_SHORT_ID_CAPACITY];
   char hostname[ITERATE_KIT_HOSTNAME_CAPACITY];
+  /* Loaded ONLY in Setup AP mode for the WPA2-PSK SoftAP passphrase; never
+   * loaded or accepted over HTTP in LAN modes. */
   char setup_code[ITERATE_KIT_SETUP_CODE_CAPACITY];
   char ip_address[20];
   char connection_state[32];
@@ -83,7 +100,6 @@ static struct {
   char banner_message[ITERATE_KIT_WEB_MESSAGE_CAPACITY];
   bool banner_is_error;
   bool reboot_pending;
-  bool enter_setup_on_reboot;
   uint64_t reboot_at_ms;
   char reboot_note[48];
   bool lan_services_started;
@@ -157,6 +173,7 @@ static void init_identity_base(
     const struct iterate_kit_configuration_presence *stored_presence) {
   uint8_t mac[6] = {0};
 
+  __atomic_store_n(&portal_writes_latched, false, __ATOMIC_SEQ_CST);
   memset(&portal, 0, sizeof(portal));
   portal.lock = xSemaphoreCreateMutex();
   portal.mode = mode;
@@ -168,12 +185,8 @@ static void init_identity_base(
   iterate_kit_device_short_id(mac, portal.short_id);
   (void)iterate_kit_device_hostname(portal.short_id, portal.hostname, sizeof(portal.hostname));
 
-  /* Guard initialized with empty setup code until Wi-Fi RF enables the HWRNG. */
   iterate_kit_portal_guard_init(
-      &portal.guard,
-      portal.short_id,
-      portal.setup_code,
-      mode == ITERATE_KIT_BOOT_MODE_SETUP_AP);
+      &portal.guard, portal.short_id, mode == ITERATE_KIT_BOOT_MODE_SETUP_AP);
 
   ESP_LOGI(
       tag, "mode=%s id=%s hostname=%s.local fw=%s",
@@ -190,19 +203,19 @@ static void init_identity_base(
  * unless a hardware noise source is active: either Wi-Fi/BT RF is started
  * (`esp_wifi_start()`), or `bootloader_random_enable()` is active.
  *
- * We deliberately start Wi-Fi RF first rather than calling
- * `bootloader_random_enable()`: on ESP32-S3 (`bootloader_random_esp32s3.c`),
- * `bootloader_random_enable()` does not touch I2S (that conflict is original
- * ESP32 only), but it reconfigures SAR ADC units 1 & 2 and `regi2c_saradc`,
- * which must never overlap with Wi-Fi RF or any ADC user. Starting Wi-Fi RF
- * first gives true RF noise to `esp_fill_random()` in all three boot modes
- * without touching SAR ADC registers or audio peripherals.
+ * We start Wi-Fi RF first rather than calling `bootloader_random_enable()`: on
+ * ESP32-S3 (`bootloader_random_esp32s3.c`), `bootloader_random_enable()` does
+ * not touch I2S (that conflict is original ESP32 only), but it reconfigures SAR
+ * ADC units 1 & 2 and `regi2c_saradc`, which must never overlap with Wi-Fi RF
+ * or any ADC user. Starting Wi-Fi RF first gives true RF noise to
+ * `esp_fill_random()` in all three boot modes without touching SAR ADC or audio.
  *
- * Both the permanent setup code (first creation in NVS) and every per-client
- * session cookie / per-session CSRF token require `portal.rf_entropy_ready`,
- * which is set true ONLY after `esp_wifi_start()` succeeds in each boot mode.
+ * Both the permanent SoftAP WPA2 passphrase (loaded/created ONLY in Setup AP
+ * mode) and every per-client session cookie, per-session CSRF token, and visual
+ * pairing pattern require `portal.rf_entropy_ready == true`, which is set ONLY
+ * after `esp_wifi_start()` succeeds in each boot mode.
  */
-static void init_secrets_with_rf_active(void) {
+static void init_setup_ap_passphrase_with_rf_active(void) {
   char qr[ITERATE_KIT_WIFI_QR_CAPACITY];
   if (!portal.rf_entropy_ready) {
     ESP_LOGE(tag, "refusing to initialize setup code before Wi-Fi RF HWRNG is active");
@@ -210,29 +223,28 @@ static void init_secrets_with_rf_active(void) {
   }
   if (!iterate_kit_platform_setup_code_load_or_create(portal.setup_code)) {
     ESP_LOGE(tag, "failed to load/create setup code");
+    return;
   }
-  /* Update setup code in place so any physical-claim window armed before Wi-Fi
-   * got an IP is preserved. */
-  iterate_kit_portal_guard_set_setup_code(&portal.guard, portal.setup_code);
-
-  if (portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
-    if (iterate_kit_wifi_qr_format(portal.hostname, portal.setup_code, qr, sizeof(qr))) {
-      ESP_LOGI(tag, "setup_ap ssid=%s setup_code=%s", portal.hostname, portal.setup_code);
-      ESP_LOGI(tag, "setup_qr %s", qr);
-    }
-    memset(qr, 0, sizeof(qr));
+  if (iterate_kit_wifi_qr_format(portal.hostname, portal.setup_code, qr, sizeof(qr))) {
+    ESP_LOGI(tag, "setup_ap ssid=%s setup_code=%s", portal.hostname, portal.setup_code);
+    ESP_LOGI(tag, "setup_qr %s", qr);
   }
+  memset(qr, 0, sizeof(qr));
 }
 
 static bool fill_session_entropy_locked(
     uint8_t sid_entropy[ITERATE_KIT_SESSION_ENTROPY_BYTES],
-    uint8_t csrf_entropy[ITERATE_KIT_CSRF_ENTROPY_BYTES]) {
+    uint8_t csrf_entropy[ITERATE_KIT_CSRF_ENTROPY_BYTES],
+    uint8_t *pattern_byte) {
   if (!portal.rf_entropy_ready) {
-    ESP_LOGE(tag, "refusing to mint session/CSRF tokens before Wi-Fi RF HWRNG is active");
+    ESP_LOGE(tag, "refusing to mint tokens before Wi-Fi RF HWRNG is active");
     return false;
   }
   esp_fill_random(sid_entropy, ITERATE_KIT_SESSION_ENTROPY_BYTES);
   esp_fill_random(csrf_entropy, ITERATE_KIT_CSRF_ENTROPY_BYTES);
+  if (pattern_byte != NULL) {
+    esp_fill_random(pattern_byte, 1U);
+  }
   return true;
 }
 
@@ -267,46 +279,57 @@ static void halt_with_erase_failure(const char *action) {
   }
 }
 
-static void lock_and_stop_portal_for_erase(bool full_wipe) {
-  httpd_handle_t server = NULL;
-  if (portal.lock != NULL) {
-    (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
-  }
-  /* Latch write refusal and wipe in-memory credentials BEFORE releasing lock
-   * and stopping the HTTP server, so no in-flight handler can deadlock or write
-   * stale RAM credentials back to flash after erase. */
+/*
+ * NON-BLOCKING PHYSICAL ACTIONS (NEVER WAIT FOR HTTP HANDLERS).
+ *
+ * We deliberately DO NOT call synchronous `httpd_stop()`, which would wait for
+ * any stalled client socket. Instead:
+ *   1. Latch `portal_writes_latched` atomically so any in-flight `read_post_body`
+ *      aborts immediately.
+ *   2. Acquire `portal.lock` — guaranteed not to block on network I/O because
+ *      no HTTP handler ever holds `portal.lock` across `recv` or `send`.
+ *   3. Permanently latch `guard.writes_disabled = true`, clear RAM copies, and
+ *      run the verified flash/NVS erase WHILE HOLDING `portal.lock`.
+ *   4. Release `portal.lock` with `writes_disabled` permanently latched so no
+ *      late HTTP handler can ever write stale state back to flash.
+ */
+static void execute_enter_setup(void) {
+  ESP_LOGI(tag, "physical Enter Setup Mode triggered — keeping Wi-Fi and Mind intact");
+  __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
+  if (portal.lock != NULL) (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
   iterate_kit_portal_guard_disable_writes(&portal.guard);
   portal.reboot_pending = false;
-  portal.enter_setup_on_reboot = false;
-  if (full_wipe) {
-    memset(&portal.config, 0, sizeof(portal.config));
-    memset(&portal.presence, 0, sizeof(portal.presence));
-  } else {
-    iterate_kit_configuration_clear_wifi(&portal.config, &portal.presence);
-  }
-  server = portal.server;
-  portal.server = NULL;
-  if (portal.lock != NULL) {
-    xSemaphoreGive(portal.lock);
-  }
-  if (server != NULL) {
-    (void)httpd_stop(server);
-  }
+  arm_setup_ap_once_rtc();
+  if (portal.lock != NULL) xSemaphoreGive(portal.lock);
+  flash_confirm_and_restart((struct iterate_kit_rgb8){44U, 0U, 56U}, "enter-setup-ap");
 }
 
 static void execute_wifi_reset(void) {
-  ESP_LOGW(tag, "Wi-Fi reset triggered — locking portal, clearing RAM and Wi-Fi flash");
-  lock_and_stop_portal_for_erase(false);
-  if (!iterate_kit_platform_clear_wifi_provisioning()) {
+  ESP_LOGW(tag, "Wi-Fi reset triggered — latching writes off, clearing RAM and Wi-Fi flash");
+  __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
+  if (portal.lock != NULL) (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
+  iterate_kit_portal_guard_disable_writes(&portal.guard);
+  portal.reboot_pending = false;
+  iterate_kit_configuration_clear_wifi(&portal.config, &portal.presence);
+  const bool ok = iterate_kit_platform_clear_wifi_provisioning();
+  if (portal.lock != NULL) xSemaphoreGive(portal.lock);
+  if (!ok) {
     halt_with_erase_failure("Wi-Fi reset");
   }
   flash_confirm_and_restart((struct iterate_kit_rgb8){0U, 36U, 48U}, "wifi-reset");
 }
 
 static void execute_full_wipe(void) {
-  ESP_LOGW(tag, "full wipe triggered — locking portal, clearing RAM, flash, NVS token and volume");
-  lock_and_stop_portal_for_erase(true);
-  if (!iterate_kit_platform_wipe_provisioning()) {
+  ESP_LOGW(tag, "full wipe triggered — latching writes off, clearing RAM, flash, NVS token and volume");
+  __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
+  if (portal.lock != NULL) (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
+  iterate_kit_portal_guard_disable_writes(&portal.guard);
+  portal.reboot_pending = false;
+  memset(&portal.config, 0, sizeof(portal.config));
+  memset(&portal.presence, 0, sizeof(portal.presence));
+  const bool ok = iterate_kit_platform_wipe_provisioning();
+  if (portal.lock != NULL) xSemaphoreGive(portal.lock);
+  if (!ok) {
     halt_with_erase_failure("full wipe");
   }
   flash_confirm_and_restart((struct iterate_kit_rgb8){48U, 4U, 0U}, "factory-wipe");
@@ -440,18 +463,34 @@ static esp_err_t send_redirect(
   return httpd_resp_send(req, "", 0);
 }
 
-static esp_err_t read_post_body(httpd_req_t *req, char *buf, size_t cap, size_t *out_len) {
+/*
+ * Bounded POST body reader with a hard monotonic wall-clock deadline.
+ * Called ONLY AFTER Host, mode policy, write-latch, and session pre-checks pass,
+ * and NEVER while holding `portal.lock`. Returning ESP_FAIL closes stalled
+ * connections immediately instead of looping forever on timeouts.
+ */
+static esp_err_t read_post_body(
+    httpd_req_t *req, char *buf, size_t max_body_bytes, size_t *out_len) {
   *out_len = 0U;
-  if (req->content_len >= cap) {
+  if (req->content_len > max_body_bytes) {
     (void)httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Request too large");
     return ESP_FAIL;
   }
+  const uint64_t deadline_ms = monotonic_ms() + (uint64_t)POST_BODY_DEADLINE_MS;
   size_t remaining = req->content_len;
   size_t offset = 0U;
   while (remaining > 0U) {
+    if (__atomic_load_n(&portal_writes_latched, __ATOMIC_SEQ_CST) ||
+        monotonic_ms() >= deadline_ms) {
+      memset(buf, 0, max_body_bytes + 1U);
+      return ESP_FAIL;
+    }
     const int received = httpd_req_recv(req, buf + offset, remaining);
     if (received <= 0) {
-      if (received == HTTPD_SOCK_ERR_TIMEOUT) continue;
+      if (received == HTTPD_SOCK_ERR_TIMEOUT && monotonic_ms() < deadline_ms) {
+        continue;
+      }
+      memset(buf, 0, max_body_bytes + 1U);
       return ESP_FAIL;
     }
     offset += (size_t)received;
@@ -489,16 +528,60 @@ static const char *auth_error_message(enum iterate_kit_portal_auth_result auth) 
       return "Session expired. Reload the page and try again.";
     case ITERATE_KIT_PORTAL_AUTH_BAD_CSRF:
       return "Form token expired. Reload the page and try again.";
-    case ITERATE_KIT_PORTAL_AUTH_LOCKED_OUT:
-      return "Too many wrong setup codes. Wait a moment or slide Mute ON and tap the button.";
     case ITERATE_KIT_PORTAL_AUTH_REQUIRED:
-      return "Settings are locked in this browser. Enter the setup code or claim a physical button tap.";
-    case ITERATE_KIT_PORTAL_AUTH_BAD_CODE:
-      return "Setup code did not match.";
+      return "This browser is not paired. Slide Mute ON, tap the puck, and confirm the ring pattern.";
     case ITERATE_KIT_PORTAL_AUTH_NO_CLAIM:
-      return "No active physical unlock window. Slide Mute ON, tap the centre button, then try again.";
+      return "No pairing window open. Slide Mute ON and tap the centre button on the puck first.";
+    case ITERATE_KIT_PORTAL_AUTH_CLAIM_BUSY:
+      return "Another browser already requested pairing. If the ring does not match your screen, slide Mute OFF to cancel.";
   }
   return "Authorization failed.";
+}
+
+/*
+ * Fast pre-check run BEFORE reading a POST request body so unauthenticated or
+ * stalled requests from unknown clients are rejected immediately at the headers.
+ */
+static bool precheck_session_before_body(
+    httpd_req_t *req,
+    const char *cookie_sid,
+    bool require_lan_unlock,
+    bool require_claim_open,
+    esp_err_t *resp_err) {
+  if (__atomic_load_n(&portal_writes_latched, __ATOMIC_SEQ_CST)) {
+    *resp_err = send_redirect(req, "/", "303 See Other", NULL);
+    return false;
+  }
+  if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(500)) != pdTRUE) {
+    *resp_err = httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
+    return false;
+  }
+  const uint64_t now = monotonic_ms();
+  const char *err_msg = NULL;
+  if (iterate_kit_portal_guard_writes_disabled(&portal.guard)) {
+    err_msg = auth_error_message(ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED);
+  } else if (!iterate_kit_portal_guard_session_exists(&portal.guard, cookie_sid)) {
+    err_msg = auth_error_message(ITERATE_KIT_PORTAL_AUTH_NO_SESSION);
+  } else if (require_lan_unlock && !portal.guard.is_setup_ap &&
+             !iterate_kit_portal_guard_session_is_unlocked(&portal.guard, cookie_sid, now)) {
+    err_msg = auth_error_message(ITERATE_KIT_PORTAL_AUTH_REQUIRED);
+  } else if (require_claim_open) {
+    const enum iterate_kit_claim_state st =
+        iterate_kit_portal_guard_claim_state(&portal.guard, now);
+    if (st == ITERATE_KIT_CLAIM_NONE) {
+      err_msg = auth_error_message(ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
+    } else if (st == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+      err_msg = auth_error_message(ITERATE_KIT_PORTAL_AUTH_CLAIM_BUSY);
+    }
+  }
+  if (err_msg != NULL) {
+    if (cookie_sid[0] != '\0') set_banner_locked(cookie_sid, err_msg, true);
+    xSemaphoreGive(portal.lock);
+    *resp_err = send_redirect(req, "/", "303 See Other", NULL);
+    return false;
+  }
+  xSemaphoreGive(portal.lock);
+  return true;
 }
 
 static bool authorize_post_locked(
@@ -539,8 +622,10 @@ static void build_status_snapshot_locked(
   out->volume_percent = portal.volume_percent;
   out->unlocked_remaining_s =
       iterate_kit_portal_guard_session_unlock_remaining_s(&portal.guard, session_token, now_ms);
-  out->physical_claim_remaining_s =
-      iterate_kit_portal_guard_physical_claim_remaining_s(&portal.guard, now_ms);
+  out->claim_state = iterate_kit_portal_guard_claim_state(&portal.guard, now_ms);
+  out->claim_remaining_s = iterate_kit_portal_guard_claim_remaining_s(&portal.guard, now_ms);
+  out->claim_is_mine = iterate_kit_portal_guard_session_has_pending_claim(
+      &portal.guard, session_token, now_ms, &out->claim_pattern);
   out->scan_results = portal.scan_results;
   out->scan_count = portal.scan_count;
   if (include_banner &&
@@ -575,7 +660,7 @@ static esp_err_t handle_get_root(httpd_req_t *req) {
     memset(cookie_sid, 0, sizeof(cookie_sid));
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
   }
-  if (!fill_session_entropy_locked(sid_entropy, csrf_entropy)) {
+  if (!fill_session_entropy_locked(sid_entropy, csrf_entropy, NULL)) {
     xSemaphoreGive(portal.lock);
     memset(cookie_sid, 0, sizeof(cookie_sid));
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "RNG not ready");
@@ -603,22 +688,25 @@ static esp_err_t handle_get_root(httpd_req_t *req) {
     portal.banner_is_error = false;
   }
   memset(active_csrf, 0, sizeof(active_csrf));
-  if (len == 0U) {
-    memset(active_sid, 0, sizeof(active_sid));
-    xSemaphoreGive(portal.lock);
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Page overflow");
-  }
   if (created_new) {
     format_set_cookie(active_sid, set_cookie);
-    (void)httpd_resp_set_hdr(req, "Set-Cookie", set_cookie);
   }
   memset(active_sid, 0, sizeof(active_sid));
+  /* Release `portal.lock` BEFORE network send so a slow client cannot block gestures. */
+  xSemaphoreGive(portal.lock);
+
+  if (len == 0U) {
+    memset(set_cookie, 0, sizeof(set_cookie));
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Page overflow");
+  }
+  if (set_cookie[0] != '\0') {
+    (void)httpd_resp_set_hdr(req, "Set-Cookie", set_cookie);
+  }
   (void)httpd_resp_set_type(req, "text/html; charset=utf-8");
   (void)httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   (void)httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
   const esp_err_t err = httpd_resp_send(req, html_buffer, (ssize_t)len);
   memset(set_cookie, 0, sizeof(set_cookie));
-  xSemaphoreGive(portal.lock);
   return err;
 }
 
@@ -637,25 +725,27 @@ static esp_err_t handle_get_status_json(httpd_req_t *req) {
   memset(cookie_sid, 0, sizeof(cookie_sid));
   const size_t len = iterate_kit_web_render_status_json(
       &portal.config, &portal.presence, &status, json_buffer, sizeof(json_buffer));
+  /* Release `portal.lock` BEFORE network send. */
+  xSemaphoreGive(portal.lock);
+
   if (len == 0U) {
-    xSemaphoreGive(portal.lock);
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON overflow");
   }
   (void)httpd_resp_set_type(req, "application/json");
   (void)httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-  const esp_err_t err = httpd_resp_send(req, json_buffer, (ssize_t)len);
-  xSemaphoreGive(portal.lock);
-  return err;
+  return httpd_resp_send(req, json_buffer, (ssize_t)len);
 }
 
-static esp_err_t handle_post_unlock(httpd_req_t *req) {
-  char body[POST_BODY_MAX_BYTES];
+static esp_err_t handle_post_claim_request(httpd_req_t *req) {
+  char body[POST_BODY_TINY_MAX + 1];
   char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   char new_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY] = {0};
   char set_cookie[SET_COOKIE_MAX_BYTES] = {0};
   uint8_t rot_sid[ITERATE_KIT_SESSION_ENTROPY_BYTES];
   uint8_t rot_csrf[ITERATE_KIT_CSRF_ENTROPY_BYTES];
+  uint8_t pattern_byte = 0U;
   size_t body_len = 0U;
+  esp_err_t pre_err = ESP_OK;
 
   if (!check_host_header(req)) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
@@ -663,78 +753,34 @@ static esp_err_t handle_post_unlock(httpd_req_t *req) {
   if (portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
     return send_redirect(req, "/", "303 See Other", NULL);
   }
-  if (read_post_body(req, body, sizeof(body), &body_len) != ESP_OK) return ESP_FAIL;
   read_session_cookie(req, cookie_sid);
+  if (!precheck_session_before_body(req, cookie_sid, false, true, &pre_err)) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return pre_err;
+  }
+  if (read_post_body(req, body, POST_BODY_TINY_MAX, &body_len) != ESP_OK) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return ESP_FAIL;
+  }
+
   if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
     memset(body, 0, sizeof(body));
     memset(cookie_sid, 0, sizeof(cookie_sid));
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
   }
-  if (!fill_session_entropy_locked(rot_sid, rot_csrf)) {
+  if (!fill_session_entropy_locked(rot_sid, rot_csrf, &pattern_byte)) {
     memset(body, 0, sizeof(body));
     memset(cookie_sid, 0, sizeof(cookie_sid));
     xSemaphoreGive(portal.lock);
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "RNG not ready");
   }
   char csrf[ITERATE_KIT_CSRF_TOKEN_CAPACITY + 8] = {0};
-  char code[24] = {0};
-  (void)iterate_kit_web_form_get_field(body, body_len, "csrf", csrf, sizeof(csrf));
-  (void)iterate_kit_web_form_get_field(body, body_len, "setup_code", code, sizeof(code));
-  const enum iterate_kit_portal_auth_result auth =
-      iterate_kit_portal_guard_unlock_with_code(
-          &portal.guard, cookie_sid, csrf, code, rot_sid, rot_csrf, monotonic_ms(), new_sid);
-  memset(rot_sid, 0, sizeof(rot_sid));
-  memset(rot_csrf, 0, sizeof(rot_csrf));
-  memset(csrf, 0, sizeof(csrf));
-  memset(code, 0, sizeof(code));
-  memset(body, 0, sizeof(body));
-  if (auth == ITERATE_KIT_PORTAL_AUTH_OK) {
-    format_set_cookie(new_sid, set_cookie);
-    set_banner_locked(new_sid, "Settings unlocked for this browser for 3 minutes.", false);
-  } else {
-    set_banner_locked(cookie_sid, auth_error_message(auth), true);
-  }
-  memset(cookie_sid, 0, sizeof(cookie_sid));
-  memset(new_sid, 0, sizeof(new_sid));
-  xSemaphoreGive(portal.lock);
-  const esp_err_t err = send_redirect(req, "/", "303 See Other", set_cookie);
-  memset(set_cookie, 0, sizeof(set_cookie));
-  return err;
-}
-
-static esp_err_t handle_post_claim_unlock(httpd_req_t *req) {
-  char body[POST_BODY_MAX_BYTES];
-  char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  char new_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY] = {0};
-  char set_cookie[SET_COOKIE_MAX_BYTES] = {0};
-  uint8_t rot_sid[ITERATE_KIT_SESSION_ENTROPY_BYTES];
-  uint8_t rot_csrf[ITERATE_KIT_CSRF_ENTROPY_BYTES];
-  size_t body_len = 0U;
-
-  if (!check_host_header(req)) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
-  }
-  if (portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
-    return send_redirect(req, "/", "303 See Other", NULL);
-  }
-  if (read_post_body(req, body, sizeof(body), &body_len) != ESP_OK) return ESP_FAIL;
-  read_session_cookie(req, cookie_sid);
-  if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    memset(body, 0, sizeof(body));
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
-  }
-  if (!fill_session_entropy_locked(rot_sid, rot_csrf)) {
-    memset(body, 0, sizeof(body));
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    xSemaphoreGive(portal.lock);
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "RNG not ready");
-  }
-  char csrf[ITERATE_KIT_CSRF_TOKEN_CAPACITY + 8] = {0};
+  struct iterate_kit_claim_pattern pattern;
   (void)iterate_kit_web_form_get_field(body, body_len, "csrf", csrf, sizeof(csrf));
   const enum iterate_kit_portal_auth_result auth =
-      iterate_kit_portal_guard_claim_physical_unlock(
-          &portal.guard, cookie_sid, csrf, rot_sid, rot_csrf, monotonic_ms(), new_sid);
+      iterate_kit_portal_guard_request_claim(
+          &portal.guard, cookie_sid, csrf, pattern_byte,
+          rot_sid, rot_csrf, monotonic_ms(), new_sid, &pattern);
   memset(rot_sid, 0, sizeof(rot_sid));
   memset(rot_csrf, 0, sizeof(rot_csrf));
   memset(csrf, 0, sizeof(csrf));
@@ -742,30 +788,77 @@ static esp_err_t handle_post_claim_unlock(httpd_req_t *req) {
   if (auth == ITERATE_KIT_PORTAL_AUTH_OK) {
     format_set_cookie(new_sid, set_cookie);
     set_banner_locked(
-        new_sid, "Physical unlock claimed. Settings unlocked for this browser for 3 minutes.", false);
+        new_sid, "Check the puck's LED ring and tap the centre button again to confirm.", false);
   } else {
     set_banner_locked(cookie_sid, auth_error_message(auth), true);
   }
   memset(cookie_sid, 0, sizeof(cookie_sid));
   memset(new_sid, 0, sizeof(new_sid));
   xSemaphoreGive(portal.lock);
+
   const esp_err_t err = send_redirect(req, "/", "303 See Other", set_cookie);
   memset(set_cookie, 0, sizeof(set_cookie));
   return err;
 }
 
+static esp_err_t handle_post_claim_cancel(httpd_req_t *req) {
+  char body[POST_BODY_TINY_MAX + 1];
+  char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
+  size_t body_len = 0U;
+  esp_err_t pre_err = ESP_OK;
+
+  if (!check_host_header(req)) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
+  }
+  if (portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
+    return send_redirect(req, "/", "303 See Other", NULL);
+  }
+  read_session_cookie(req, cookie_sid);
+  if (!precheck_session_before_body(req, cookie_sid, false, false, &pre_err)) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return pre_err;
+  }
+  if (read_post_body(req, body, POST_BODY_TINY_MAX, &body_len) != ESP_OK) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return ESP_FAIL;
+  }
+
+  if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    memset(body, 0, sizeof(body));
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
+  }
+  char csrf[ITERATE_KIT_CSRF_TOKEN_CAPACITY + 8] = {0};
+  (void)iterate_kit_web_form_get_field(body, body_len, "csrf", csrf, sizeof(csrf));
+  const enum iterate_kit_portal_auth_result auth =
+      iterate_kit_portal_guard_cancel_claim_by_session(
+          &portal.guard, cookie_sid, csrf, monotonic_ms());
+  memset(csrf, 0, sizeof(csrf));
+  memset(body, 0, sizeof(body));
+  if (auth == ITERATE_KIT_PORTAL_AUTH_OK) {
+    set_banner_locked(cookie_sid, "Pairing request cancelled.", false);
+  } else {
+    set_banner_locked(cookie_sid, auth_error_message(auth), true);
+  }
+  memset(cookie_sid, 0, sizeof(cookie_sid));
+  xSemaphoreGive(portal.lock);
+  return send_redirect(req, "/", "303 See Other", NULL);
+}
+
 static esp_err_t handle_post_config_action(
     httpd_req_t *req,
     enum iterate_kit_web_action action,
+    size_t max_body_bytes,
     void (*apply_fn)(
         const char *, size_t,
         struct iterate_kit_configuration *,
         struct iterate_kit_configuration_presence *,
         struct iterate_kit_portal_action_result *),
     const char *reboot_note) {
-  char body[POST_BODY_MAX_BYTES];
+  char body[POST_BODY_MIND_MAX + 1];
   char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   size_t body_len = 0U;
+  esp_err_t pre_err = ESP_OK;
 
   if (!check_host_header(req)) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
@@ -773,10 +866,20 @@ static esp_err_t handle_post_config_action(
   if (!iterate_kit_web_action_allowed(portal.mode, action)) {
     return httpd_resp_send_err(
         req, HTTPD_403_FORBIDDEN,
-        "Credentials are accepted only in encrypted Setup Mode (WPA2 SoftAP)");
+        "This action is permitted only in encrypted Setup Mode (WPA2 SoftAP)");
   }
-  if (read_post_body(req, body, sizeof(body), &body_len) != ESP_OK) return ESP_FAIL;
   read_session_cookie(req, cookie_sid);
+  if (!precheck_session_before_body(
+          req, cookie_sid, action == ITERATE_KIT_WEB_ACTION_SETTINGS, false, &pre_err)) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return pre_err;
+  }
+  if (max_body_bytes > POST_BODY_MIND_MAX) max_body_bytes = POST_BODY_MIND_MAX;
+  if (read_post_body(req, body, max_body_bytes, &body_len) != ESP_OK) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return ESP_FAIL;
+  }
+
   if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
     memset(body, 0, sizeof(body));
     memset(cookie_sid, 0, sizeof(cookie_sid));
@@ -831,7 +934,8 @@ static esp_err_t handle_post_config_action(
 
   set_banner_locked(cookie_sid, result.message, false);
   memset(cookie_sid, 0, sizeof(cookie_sid));
-  if (result.reboot_needed) {
+  if (result.reboot_needed && portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
+    __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
     iterate_kit_portal_guard_disable_writes(&portal.guard);
     schedule_reboot_locked(reboot_note, now);
   }
@@ -841,116 +945,45 @@ static esp_err_t handle_post_config_action(
 
 static esp_err_t handle_post_wifi(httpd_req_t *req) {
   return handle_post_config_action(
-      req, ITERATE_KIT_WEB_ACTION_WIFI, iterate_kit_web_apply_wifi_form, "wifi-updated");
+      req, ITERATE_KIT_WEB_ACTION_WIFI, POST_BODY_WIFI_MAX,
+      iterate_kit_web_apply_wifi_form, "wifi-updated");
 }
 
 static esp_err_t handle_post_mind(httpd_req_t *req) {
   return handle_post_config_action(
-      req, ITERATE_KIT_WEB_ACTION_MIND, iterate_kit_web_apply_mind_form, "mind-updated");
+      req, ITERATE_KIT_WEB_ACTION_MIND, POST_BODY_MIND_MAX,
+      iterate_kit_web_apply_mind_form, "mind-updated");
 }
 
 static esp_err_t handle_post_settings(httpd_req_t *req) {
   return handle_post_config_action(
-      req, ITERATE_KIT_WEB_ACTION_SETTINGS, iterate_kit_web_apply_settings_form, "settings-updated");
-}
-
-static esp_err_t handle_post_enter_setup(httpd_req_t *req) {
-  char body[POST_BODY_MAX_BYTES];
-  char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  size_t body_len = 0U;
-
-  if (!check_host_header(req)) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
-  }
-  if (!iterate_kit_web_action_allowed(portal.mode, ITERATE_KIT_WEB_ACTION_ENTER_SETUP)) {
-    return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Already in Setup Mode");
-  }
-  if (read_post_body(req, body, sizeof(body), &body_len) != ESP_OK) return ESP_FAIL;
-  read_session_cookie(req, cookie_sid);
-  if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    memset(body, 0, sizeof(body));
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
-  }
-  const uint64_t now = monotonic_ms();
-  const char *auth_err = NULL;
-  if (!authorize_post_locked(cookie_sid, body, body_len, now, &auth_err)) {
-    set_banner_locked(cookie_sid, auth_err, true);
-    memset(body, 0, sizeof(body));
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    xSemaphoreGive(portal.lock);
-    return send_redirect(req, "/", "303 See Other", NULL);
-  }
-  memset(body, 0, sizeof(body));
-  iterate_kit_portal_guard_disable_writes(&portal.guard);
-  portal.enter_setup_on_reboot = true;
-  set_banner_locked(
-      cookie_sid,
-      "Restarting into encrypted Setup Mode (WPA2 SoftAP). Join the board's setup Wi-Fi.",
-      false);
-  memset(cookie_sid, 0, sizeof(cookie_sid));
-  schedule_reboot_locked("enter-setup-ap", now);
-  xSemaphoreGive(portal.lock);
-  return send_redirect(req, "/", "303 See Other", NULL);
-}
-
-static esp_err_t handle_post_reset_wifi(httpd_req_t *req) {
-  char body[POST_BODY_MAX_BYTES];
-  char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
-  size_t body_len = 0U;
-
-  if (!check_host_header(req)) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
-  }
-  if (!iterate_kit_web_action_allowed(portal.mode, ITERATE_KIT_WEB_ACTION_RESET_WIFI)) {
-    return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Not allowed in Setup Mode");
-  }
-  if (read_post_body(req, body, sizeof(body), &body_len) != ESP_OK) return ESP_FAIL;
-  read_session_cookie(req, cookie_sid);
-  if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    memset(body, 0, sizeof(body));
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Busy");
-  }
-  const uint64_t now = monotonic_ms();
-  const char *auth_err = NULL;
-  if (!authorize_post_locked(cookie_sid, body, body_len, now, &auth_err)) {
-    set_banner_locked(cookie_sid, auth_err, true);
-    memset(body, 0, sizeof(body));
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    xSemaphoreGive(portal.lock);
-    return send_redirect(req, "/", "303 See Other", NULL);
-  }
-  memset(body, 0, sizeof(body));
-  iterate_kit_portal_guard_disable_writes(&portal.guard);
-  iterate_kit_configuration_clear_wifi(&portal.config, &portal.presence);
-  if (!iterate_kit_platform_clear_wifi_provisioning()) {
-    (void)iterate_kit_platform_read_stored_provisioning(&portal.config, &portal.presence);
-    iterate_kit_portal_guard_enable_writes(&portal.guard);
-    set_banner_locked(
-        cookie_sid, "Failed to clear and verify Wi-Fi credentials in flash.", true);
-    memset(cookie_sid, 0, sizeof(cookie_sid));
-    xSemaphoreGive(portal.lock);
-    return send_redirect(req, "/", "303 See Other", NULL);
-  }
-  set_banner_locked(
-      cookie_sid, "Wi-Fi cleared and verified (mind preserved). Restarting into Setup Mode.", false);
-  memset(cookie_sid, 0, sizeof(cookie_sid));
-  schedule_reboot_locked("web-wifi-reset", now);
-  xSemaphoreGive(portal.lock);
-  return send_redirect(req, "/", "303 See Other", NULL);
+      req, ITERATE_KIT_WEB_ACTION_SETTINGS, POST_BODY_SETTINGS_MAX,
+      iterate_kit_web_apply_settings_form, "settings-updated");
 }
 
 static esp_err_t handle_post_reboot(httpd_req_t *req) {
-  char body[POST_BODY_MAX_BYTES];
+  char body[POST_BODY_TINY_MAX + 1];
   char cookie_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   size_t body_len = 0U;
+  esp_err_t pre_err = ESP_OK;
 
   if (!check_host_header(req)) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unexpected Host header");
   }
-  if (read_post_body(req, body, sizeof(body), &body_len) != ESP_OK) return ESP_FAIL;
+  if (!iterate_kit_web_action_allowed(portal.mode, ITERATE_KIT_WEB_ACTION_REBOOT)) {
+    return httpd_resp_send_err(
+        req, HTTPD_403_FORBIDDEN, "Reboot is permitted only in encrypted Setup Mode");
+  }
   read_session_cookie(req, cookie_sid);
+  if (!precheck_session_before_body(req, cookie_sid, false, false, &pre_err)) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return pre_err;
+  }
+  if (read_post_body(req, body, POST_BODY_TINY_MAX, &body_len) != ESP_OK) {
+    memset(cookie_sid, 0, sizeof(cookie_sid));
+    return ESP_FAIL;
+  }
+
   if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
     memset(body, 0, sizeof(body));
     memset(cookie_sid, 0, sizeof(cookie_sid));
@@ -966,10 +999,11 @@ static esp_err_t handle_post_reboot(httpd_req_t *req) {
     return send_redirect(req, "/", "303 See Other", NULL);
   }
   memset(body, 0, sizeof(body));
+  __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
   iterate_kit_portal_guard_disable_writes(&portal.guard);
-  set_banner_locked(cookie_sid, "Rebooting device.", false);
+  set_banner_locked(cookie_sid, "Exiting Setup Mode and rejoining Wi-Fi.", false);
   memset(cookie_sid, 0, sizeof(cookie_sid));
-  schedule_reboot_locked("web-reboot", now);
+  schedule_reboot_locked("exit-setup-ap", now);
   xSemaphoreGive(portal.lock);
   return send_redirect(req, "/", "303 See Other", NULL);
 }
@@ -995,7 +1029,9 @@ static bool start_http_server(void) {
   config.core_id = 0;
   config.max_open_sockets = 4;
   config.lru_purge_enable = true;
-  config.max_uri_handlers = 12;
+  config.recv_wait_timeout = 2;
+  config.send_wait_timeout = 2;
+  config.max_uri_handlers = 10;
 
   if (httpd_start(&portal.server, &config) != ESP_OK) {
     ESP_LOGE(tag, "httpd_start failed");
@@ -1005,13 +1041,11 @@ static bool start_http_server(void) {
   static const httpd_uri_t routes[] = {
     {.uri = "/", .method = HTTP_GET, .handler = handle_get_root},
     {.uri = "/api/status", .method = HTTP_GET, .handler = handle_get_status_json},
-    {.uri = "/unlock", .method = HTTP_POST, .handler = handle_post_unlock},
-    {.uri = "/claim-unlock", .method = HTTP_POST, .handler = handle_post_claim_unlock},
+    {.uri = "/claim-request", .method = HTTP_POST, .handler = handle_post_claim_request},
+    {.uri = "/claim-cancel", .method = HTTP_POST, .handler = handle_post_claim_cancel},
     {.uri = "/wifi", .method = HTTP_POST, .handler = handle_post_wifi},
     {.uri = "/mind", .method = HTTP_POST, .handler = handle_post_mind},
     {.uri = "/settings", .method = HTTP_POST, .handler = handle_post_settings},
-    {.uri = "/enter-setup", .method = HTTP_POST, .handler = handle_post_enter_setup},
-    {.uri = "/reset-wifi", .method = HTTP_POST, .handler = handle_post_reset_wifi},
     {.uri = "/reboot", .method = HTTP_POST, .handler = handle_post_reboot},
   };
   for (size_t i = 0U; i < sizeof(routes) / sizeof(routes[0]); ++i) {
@@ -1096,41 +1130,90 @@ static void lan_unlinked_ip_event(
       xSemaphoreGive(portal.lock);
     }
     ESP_LOGI(
-        tag, "joined Wi-Fi (IP %s) — open http://%s.local/ for status or to enter Setup Mode",
+        tag, "joined Wi-Fi (IP %s) — open http://%s.local/ for status; hold Mute+button 3 s to link Mind",
         portal.ip_address, portal.hostname);
   }
 }
 
-static void handle_gesture_event(enum havpe_gesture_event event, uint64_t now_ms) {
+static void handle_gesture_and_claim_cancel(
+    enum havpe_gesture_event event,
+    enum havpe_gesture_visual vis,
+    bool muted,
+    uint64_t now_ms) {
   if (event == HAVPE_GESTURE_WIFI_RESET) {
     execute_wifi_reset();
   } else if (event == HAVPE_GESTURE_FULL_WIPE) {
     execute_full_wipe();
-  } else if (event == HAVPE_GESTURE_LAN_UNLOCK) {
+  } else if (event == HAVPE_GESTURE_ENTER_SETUP) {
+    if (portal.mode != ITERATE_KIT_BOOT_MODE_SETUP_AP) {
+      execute_enter_setup();
+    }
+  } else if (event == HAVPE_GESTURE_PAIR_TAP && portal.mode != ITERATE_KIT_BOOT_MODE_SETUP_AP) {
+    bool confirmed = false;
     if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(200)) == pdTRUE) {
-      iterate_kit_portal_guard_arm_physical_claim(&portal.guard, now_ms);
+      if (iterate_kit_portal_guard_claim_state(&portal.guard, now_ms) ==
+          ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+        confirmed = iterate_kit_portal_guard_confirm_claim(&portal.guard, now_ms);
+      } else {
+        iterate_kit_portal_guard_open_claim(&portal.guard, now_ms);
+      }
       xSemaphoreGive(portal.lock);
     }
-    ESP_LOGI(tag, "physical unlock claim armed for 30 s (one-time browser claim)");
+    if (confirmed) {
+      havpe_reset_gesture_trigger_unlock_flash(&portal.gesture, now_ms);
+      ESP_LOGI(tag, "LAN browser visual pairing confirmed for 180 s");
+    } else {
+      ESP_LOGI(tag, "LAN browser pairing window opened for 30 s");
+    }
+    return;
   }
+
+  /* "Anything else cancels": sliding Mute OFF or entering any hold cancels any claim. */
+  if (portal.mode != ITERATE_KIT_BOOT_MODE_SETUP_AP &&
+      (!muted || (vis != HAVPE_VISUAL_NONE && vis != HAVPE_VISUAL_UNLOCK_FLASH))) {
+    if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
+      if (portal.guard.claim_state != ITERATE_KIT_CLAIM_NONE) {
+        iterate_kit_portal_guard_cancel_claim(&portal.guard);
+        ESP_LOGI(tag, "pending LAN pairing cancelled");
+      }
+      xSemaphoreGive(portal.lock);
+    }
+  }
+}
+
+static bool render_claim_ring_overlay(
+    uint64_t now_ms, struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]) {
+  enum iterate_kit_claim_state state = ITERATE_KIT_CLAIM_NONE;
+  struct iterate_kit_claim_pattern pattern = {0};
+  if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
+    state = iterate_kit_portal_guard_claim_state(&portal.guard, now_ms);
+    if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+      (void)iterate_kit_portal_guard_active_claim_pattern(&portal.guard, now_ms, &pattern);
+    }
+    xSemaphoreGive(portal.lock);
+  }
+  if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+    havpe_ring_render_claim_pattern(pattern.color, pattern.position, (uint32_t)now_ms, pixels);
+    return true;
+  }
+  if (state == ITERATE_KIT_CLAIM_OPEN) {
+    havpe_ring_render_claim_open((uint32_t)now_ms, pixels);
+    return true;
+  }
+  return false;
 }
 
 static void check_deferred_reboot(uint64_t now_ms) {
   char note[48] = {0};
   bool due = false;
-  bool enter_setup = false;
   if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
     if (portal.reboot_pending && now_ms >= portal.reboot_at_ms) {
       due = true;
-      enter_setup = portal.enter_setup_on_reboot;
       (void)snprintf(note, sizeof(note), "%s", portal.reboot_note);
     }
     xSemaphoreGive(portal.lock);
   }
   if (due) {
-    if (enter_setup) {
-      arm_setup_ap_once_rtc();
-    }
     ESP_LOGI(tag, "restarting (%s)", note);
     iterate_kit_platform_restart_with_note(note);
   }
@@ -1167,11 +1250,11 @@ void havpe_portal_run_setup_ap(
   (void)esp_wifi_set_mode(WIFI_MODE_STA);
   if (esp_wifi_start() == ESP_OK) {
     portal.rf_entropy_ready = true;
-    init_secrets_with_rf_active();
+    init_setup_ap_passphrase_with_rf_active();
     portal.rf_entropy_ready = false;
     (void)esp_wifi_stop();
   } else {
-    ESP_LOGE(tag, "esp_wifi_start(STA) failed; cannot initialize HWRNG secrets");
+    ESP_LOGE(tag, "esp_wifi_start(STA) failed; cannot initialize HWRNG setup code");
   }
 
   wifi_config_t ap_cfg = {0};
@@ -1186,6 +1269,7 @@ void havpe_portal_run_setup_ap(
 
   (void)esp_wifi_set_mode(WIFI_MODE_APSTA);
   (void)esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+  memset(&ap_cfg, 0, sizeof(ap_cfg));
   if (esp_wifi_start() == ESP_OK) {
     portal.rf_entropy_ready = true;
     (void)esp_wifi_scan_start(NULL, false);
@@ -1198,15 +1282,16 @@ void havpe_portal_run_setup_ap(
 
   for (;;) {
     const uint64_t now = monotonic_ms();
+    const bool muted = read_muted();
     const enum havpe_gesture_event ev = havpe_reset_gesture_step(
-        &portal.gesture, read_button_pressed(), read_muted(), now);
-    handle_gesture_event(ev, now);
-    check_deferred_reboot(now);
-
-    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
+        &portal.gesture, read_button_pressed(), muted, now);
     enum havpe_gesture_visual vis = HAVPE_VISUAL_NONE;
     uint8_t progress = 0U;
     havpe_reset_gesture_visual(&portal.gesture, now, &vis, &progress);
+    handle_gesture_and_claim_cancel(ev, vis, muted, now);
+    check_deferred_reboot(now);
+
+    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     if (vis != HAVPE_VISUAL_NONE) {
       havpe_ring_render_gesture(vis, progress, (uint32_t)now, pixels);
     } else {
@@ -1248,10 +1333,11 @@ void havpe_portal_run_lan_unlinked(
   (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
   (void)esp_wifi_set_mode(WIFI_MODE_STA);
   (void)esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+  memset(&sta_cfg, 0, sizeof(sta_cfg));
   if (esp_wifi_start() == ESP_OK) {
-    /* Wi-Fi RF is now active, so setup code and per-session/CSRF tokens use HWRNG. */
+    /* Wi-Fi RF is now active, so per-session/CSRF tokens and pairing patterns use HWRNG.
+     * Note: the SoftAP setup code is never loaded or accepted in LAN modes. */
     portal.rf_entropy_ready = true;
-    init_secrets_with_rf_active();
     start_mdns_once();
     (void)start_http_server();
   } else {
@@ -1260,9 +1346,13 @@ void havpe_portal_run_lan_unlinked(
 
   for (;;) {
     const uint64_t now = monotonic_ms();
+    const bool muted = read_muted();
     const enum havpe_gesture_event ev = havpe_reset_gesture_step(
-        &portal.gesture, read_button_pressed(), read_muted(), now);
-    handle_gesture_event(ev, now);
+        &portal.gesture, read_button_pressed(), muted, now);
+    enum havpe_gesture_visual vis = HAVPE_VISUAL_NONE;
+    uint8_t progress = 0U;
+    havpe_reset_gesture_visual(&portal.gesture, now, &vis, &progress);
+    handle_gesture_and_claim_cancel(ev, vis, muted, now);
     check_deferred_reboot(now);
 
     bool connected = false;
@@ -1271,12 +1361,9 @@ void havpe_portal_run_lan_unlinked(
       xSemaphoreGive(portal.lock);
     }
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
-    enum havpe_gesture_visual vis = HAVPE_VISUAL_NONE;
-    uint8_t progress = 0U;
-    havpe_reset_gesture_visual(&portal.gesture, now, &vis, &progress);
     if (vis != HAVPE_VISUAL_NONE) {
       havpe_ring_render_gesture(vis, progress, (uint32_t)now, pixels);
-    } else {
+    } else if (!render_claim_ring_overlay(now, pixels)) {
       havpe_ring_render_lan_unlinked(connected, (uint32_t)now, pixels);
     }
     iterate_kit_led_ring_show_pixels(pixels, 150U);
@@ -1288,7 +1375,6 @@ void havpe_portal_run_lan_unlinked(
 void havpe_portal_prepare_normal(
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
-  /* Secrets are deferred until Wi-Fi STA is active in havpe_portal_poll_normal(). */
   init_identity_base(ITERATE_KIT_BOOT_MODE_NORMAL, stored_cfg, stored_presence);
   (void)snprintf(portal.connection_state, sizeof(portal.connection_state), "wifi_connecting");
 }
@@ -1306,15 +1392,17 @@ void havpe_portal_poll_normal(
 
   const enum havpe_gesture_event ev =
       havpe_reset_gesture_step(&portal.gesture, button_pressed, muted, now_ms);
-  handle_gesture_event(ev, now_ms);
-  check_deferred_reboot(now_ms);
-
   enum havpe_gesture_visual vis = HAVPE_VISUAL_NONE;
   uint8_t progress = 0U;
   havpe_reset_gesture_visual(&portal.gesture, now_ms, &vis, &progress);
+  handle_gesture_and_claim_cancel(ev, vis, muted, now_ms);
+  check_deferred_reboot(now_ms);
+
+  struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
   if (vis != HAVPE_VISUAL_NONE) {
-    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     havpe_ring_render_gesture(vis, progress, (uint32_t)now_ms, pixels);
+    iterate_kit_led_ring_show_pixels(pixels, 120U);
+  } else if (render_claim_ring_overlay(now_ms, pixels)) {
     iterate_kit_led_ring_show_pixels(pixels, 120U);
   }
 
@@ -1360,7 +1448,6 @@ void havpe_portal_poll_normal(
     /* Wi-Fi STA is running and associated, so RF HWRNG entropy is active. */
     if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(500)) == pdTRUE) {
       portal.rf_entropy_ready = true;
-      init_secrets_with_rf_active();
       xSemaphoreGive(portal.lock);
     }
     start_mdns_once();

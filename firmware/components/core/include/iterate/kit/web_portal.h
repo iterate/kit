@@ -14,7 +14,7 @@ extern "C" {
 
 enum {
   ITERATE_KIT_WEB_SCAN_MAX = 16,
-  ITERATE_KIT_WEB_MESSAGE_CAPACITY = 128,
+  ITERATE_KIT_WEB_MESSAGE_CAPACITY = 160,
 };
 
 struct iterate_kit_wifi_scan_entry {
@@ -36,7 +36,10 @@ struct iterate_kit_portal_status {
   bool key_refused;
   uint8_t volume_percent;
   uint32_t unlocked_remaining_s;
-  uint32_t physical_claim_remaining_s;
+  enum iterate_kit_claim_state claim_state;
+  uint32_t claim_remaining_s;
+  bool claim_is_mine;
+  struct iterate_kit_claim_pattern claim_pattern;
   const struct iterate_kit_wifi_scan_entry *scan_results;
   size_t scan_count;
   const char *banner_message;
@@ -54,8 +57,6 @@ enum iterate_kit_web_action {
   ITERATE_KIT_WEB_ACTION_WIFI = 0,
   ITERATE_KIT_WEB_ACTION_MIND,
   ITERATE_KIT_WEB_ACTION_SETTINGS,
-  ITERATE_KIT_WEB_ACTION_ENTER_SETUP,
-  ITERATE_KIT_WEB_ACTION_RESET_WIFI,
   ITERATE_KIT_WEB_ACTION_REBOOT,
 };
 
@@ -71,13 +72,13 @@ struct iterate_kit_portal_action_result {
 
 /**
  * Policy enforcing which mutating actions are permitted in each boot mode:
- * - WIFI and MIND (which carry a Wi-Fi password or OAuth refresh token / API
- *   key) are permitted ONLY in SETUP_AP over the board's WPA2-PSK SoftAP and
- *   NEVER over plain-HTTP LAN.
- * - SETTINGS (non-secret status voice and speaker volume) and REBOOT are
- *   permitted in all modes.
- * - ENTER_SETUP and RESET_WIFI are permitted on LAN modes to transition back
- *   to encrypted Setup Mode.
+ * - WIFI, MIND, and REBOOT are permitted ONLY in SETUP_AP over the board's
+ *   WPA2-PSK SoftAP and NEVER over plain-HTTP LAN.
+ * - SETTINGS (non-secret status voice and speaker volume ONLY) is permitted in
+ *   all modes (on LAN, only for a browser whose visual claim was confirmed on
+ *   the board).
+ * - Entering Setup Mode, resetting Wi-Fi, and full wipe are physical gestures
+ *   only; no LAN HTTP route exists for them.
  */
 bool iterate_kit_web_action_allowed(
     enum iterate_kit_boot_mode mode, enum iterate_kit_web_action action);
@@ -151,7 +152,8 @@ void iterate_kit_web_apply_settings_form(
 /**
  * Renders the single-page mobile-friendly HTML UI (both Setup AP and LAN
  * modes). Never emits stored secrets (Wi-Fi password, refresh token, API key,
- * or setup code). In LAN modes, never renders password or refresh-token forms.
+ * or setup code). In LAN modes, never renders setup-code unlock, password,
+ * refresh-token, reset-wifi, enter-setup, or reboot forms.
  * Returns bytes written (excluding NUL), or 0 on overflow.
  */
 size_t iterate_kit_web_render_page(
@@ -163,8 +165,9 @@ size_t iterate_kit_web_render_page(
     size_t capacity);
 
 /**
- * Renders read-only `/api/status` JSON. Never emits any secret or CSRF token.
- * Returns bytes written (excluding NUL), or 0 on overflow.
+ * Renders read-only `/api/status` JSON. Never emits any secret, CSRF token, or
+ * another browser's pairing state. Returns bytes written (excluding NUL), or 0
+ * on overflow.
  */
 size_t iterate_kit_web_render_status_json(
     const struct iterate_kit_configuration *configuration,

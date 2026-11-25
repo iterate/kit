@@ -25,7 +25,6 @@ static void unmuted_five_second_hold_resets_wifi_and_never_wipes(void) {
   enum havpe_gesture_visual vis;
   uint8_t leds;
 
-  /* Initialize released. */
   assert(havpe_reset_gesture_step(&g, false, false, 0U) == HAVPE_GESTURE_NONE);
 
   /* Press down and debounce (30 ms). */
@@ -58,74 +57,100 @@ static void unmuted_five_second_hold_resets_wifi_and_never_wipes(void) {
   assert(havpe_reset_gesture_step(&g, false, false, 20630U) == HAVPE_GESTURE_NONE);
 }
 
-static void muted_tap_unlocks_and_ten_second_hold_full_wipes(void) {
+static void muted_tap_setup_mode_dead_zone_and_full_wipe_are_distinct(void) {
   struct havpe_reset_gesture g = {0};
   enum havpe_gesture_visual vis;
   uint8_t leds;
 
   assert(havpe_reset_gesture_step(&g, false, true, 0U) == HAVPE_GESTURE_NONE);
 
-  /* Muted short tap -> LAN_UNLOCK + 2 s green flash. */
+  /* 1) Muted short tap (< 1.5 s) -> PAIR_TAP (caller triggers unlock flash on Tap 2). */
   assert(havpe_reset_gesture_step(&g, true, true, 100U) == HAVPE_GESTURE_NONE);
   assert(havpe_reset_gesture_step(&g, true, true, 130U) == HAVPE_GESTURE_NONE);
   assert(havpe_reset_gesture_step(&g, false, true, 400U) == HAVPE_GESTURE_NONE);
-  assert(havpe_reset_gesture_step(&g, false, true, 430U) == HAVPE_GESTURE_LAN_UNLOCK);
+  assert(havpe_reset_gesture_step(&g, false, true, 430U) == HAVPE_GESTURE_PAIR_TAP);
+  havpe_reset_gesture_trigger_unlock_flash(&g, 430U);
   havpe_reset_gesture_visual(&g, 500U, &vis, &leds);
   assert(vis == HAVPE_VISUAL_UNLOCK_FLASH);
   havpe_reset_gesture_visual(&g, 2500U, &vis, &leds);
   assert(vis == HAVPE_VISUAL_NONE);
 
-  /* Muted 6 s hold released early -> NONE (does not Wi-Fi reset or wipe). */
+  /* 2) Muted 3.5 s hold -> ENTER_SETUP (violet progress 1.5..3 s, armed 3..6 s). */
   assert(havpe_reset_gesture_step(&g, true, true, 3000U) == HAVPE_GESTURE_NONE);
   assert(havpe_reset_gesture_step(&g, true, true, 3030U) == HAVPE_GESTURE_NONE);
-  havpe_reset_gesture_visual(&g, 9030U, &vis, &leds);
-  assert(vis == HAVPE_VISUAL_FULL_WIPE_PROGRESS && leds > 0U && leds < 12U);
-  assert(havpe_reset_gesture_step(&g, false, true, 9050U) == HAVPE_GESTURE_NONE);
-  assert(havpe_reset_gesture_step(&g, false, true, 9080U) == HAVPE_GESTURE_NONE);
+  havpe_reset_gesture_visual(&g, 5200U, &vis, &leds);
+  assert(vis == HAVPE_VISUAL_SETUP_MODE_PROGRESS && leds > 0U && leds < 12U);
+  havpe_reset_gesture_visual(&g, 6500U, &vis, &leds);
+  assert(vis == HAVPE_VISUAL_SETUP_MODE_ARMED && leds == 12U);
+  assert(havpe_reset_gesture_step(&g, false, true, 6550U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, false, true, 6580U) == HAVPE_GESTURE_ENTER_SETUP);
 
-  /* Muted 10.5 s hold -> FULL_WIPE. */
+  /* 3) Muted 7.5 s hold (6..10 s dead-zone) -> red warning arc; release does NOTHING. */
   assert(havpe_reset_gesture_step(&g, true, true, 10000U) == HAVPE_GESTURE_NONE);
   assert(havpe_reset_gesture_step(&g, true, true, 10030U) == HAVPE_GESTURE_NONE);
-  havpe_reset_gesture_visual(&g, 20500U, &vis, &leds);
-  assert(vis == HAVPE_VISUAL_FULL_WIPE_ARMED && leds == 12U);
-  assert(havpe_reset_gesture_step(&g, false, true, 20600U) == HAVPE_GESTURE_NONE);
-  assert(havpe_reset_gesture_step(&g, false, true, 20630U) == HAVPE_GESTURE_FULL_WIPE);
+  havpe_reset_gesture_visual(&g, 17530U, &vis, &leds);
+  assert(vis == HAVPE_VISUAL_FULL_WIPE_PROGRESS && leds > 0U && leds < 12U);
+  assert(havpe_reset_gesture_step(&g, false, true, 17550U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, false, true, 17580U) == HAVPE_GESTURE_NONE);
 
-  /* Flipping mute switch mid-hold cancels cleanly. */
-  assert(havpe_reset_gesture_step(&g, true, true, 30000U) == HAVPE_GESTURE_NONE);
-  assert(havpe_reset_gesture_step(&g, true, true, 30030U) == HAVPE_GESTURE_NONE);
-  assert(havpe_reset_gesture_step(&g, true, false, 35000U) == HAVPE_GESTURE_NONE);
-  havpe_reset_gesture_visual(&g, 35000U, &vis, &leds);
+  /* 4) Muted 10.5 s hold -> FULL_WIPE (red armed 10..15 s). */
+  assert(havpe_reset_gesture_step(&g, true, true, 20000U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, true, true, 20030U) == HAVPE_GESTURE_NONE);
+  havpe_reset_gesture_visual(&g, 30500U, &vis, &leds);
+  assert(vis == HAVPE_VISUAL_FULL_WIPE_ARMED && leds == 12U);
+  assert(havpe_reset_gesture_step(&g, false, true, 30600U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, false, true, 30630U) == HAVPE_GESTURE_FULL_WIPE);
+
+  /* 5) Flipping mute switch mid-hold cancels cleanly. */
+  assert(havpe_reset_gesture_step(&g, true, true, 40000U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, true, true, 40030U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, true, false, 43500U) == HAVPE_GESTURE_NONE);
+  havpe_reset_gesture_visual(&g, 43500U, &vis, &leds);
   assert(vis == HAVPE_VISUAL_NONE);
-  assert(havpe_reset_gesture_step(&g, false, false, 41000U) == HAVPE_GESTURE_NONE);
-  assert(havpe_reset_gesture_step(&g, false, false, 41030U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, false, false, 44000U) == HAVPE_GESTURE_NONE);
+  assert(havpe_reset_gesture_step(&g, false, false, 44030U) == HAVPE_GESTURE_NONE);
 }
 
-static void renders_distinct_ring_patterns_for_modes_and_gestures(void) {
+static void renders_distinct_ring_patterns_for_modes_gestures_and_claims(void) {
   struct iterate_kit_rgb8 ap0[12], ap1[12];
   struct iterate_kit_rgb8 lan_wait[12], lan_ready[12];
-  struct iterate_kit_rgb8 wifi_arm[12], wipe_arm[12];
+  struct iterate_kit_rgb8 wifi_arm[12], setup_arm[12], wipe_arm[12];
+  struct iterate_kit_rgb8 claim_open[12], claim_pat[12];
+  struct iterate_kit_rgb8 err0[12], err1[12];
 
   havpe_ring_render_setup_ap(0U, ap0);
   havpe_ring_render_setup_ap(300U, ap1);
-  /* Comet advances and is cyan (red == 0, blue > green). */
   assert(memcmp(ap0, ap1, sizeof(ap0)) != 0);
   assert(ap0[0].red == 0U && ap0[0].blue > ap0[0].green);
 
   havpe_ring_render_lan_unlinked(false, 600U, lan_wait);
   havpe_ring_render_lan_unlinked(true, 600U, lan_ready);
-  /* Connecting is amber (red > 0, blue == 0); awaiting mind is teal (red == 0, blue > 0). */
   assert(lan_wait[0].red > 0U && lan_wait[0].blue == 0U);
   assert(lan_ready[0].red == 0U && lan_ready[0].blue > 0U);
 
   havpe_ring_render_gesture(HAVPE_VISUAL_WIFI_RESET_ARMED, 12U, 0U, wifi_arm);
+  havpe_ring_render_gesture(HAVPE_VISUAL_SETUP_MODE_ARMED, 12U, 0U, setup_arm);
   havpe_ring_render_gesture(HAVPE_VISUAL_FULL_WIPE_ARMED, 12U, 0U, wipe_arm);
-  /* Wi-Fi reset is cyan; full wipe is red. */
+  /* Wi-Fi reset is cyan; Setup Mode is violet (red+blue, green==0); Full wipe is red. */
   assert(wifi_arm[0].red == 0U && wifi_arm[0].blue > 20U);
+  assert(setup_arm[0].red > 20U && setup_arm[0].green == 0U && setup_arm[0].blue > 20U);
   assert(wipe_arm[0].red > 20U && wipe_arm[0].blue == 0U);
 
+  /* Claim open is calm white; claim pattern lights ONLY the 3 quadrant LEDs in the claim colour. */
+  havpe_ring_render_claim_open(300U, claim_open);
+  assert(claim_open[0].red == claim_open[0].green && claim_open[0].green == claim_open[0].blue);
+  havpe_ring_render_claim_pattern(
+      ITERATE_KIT_CLAIM_COLOR_MAGENTA, ITERATE_KIT_CLAIM_POS_RIGHT, 500U, claim_pat);
+  for (uint8_t i = 0U; i < 12U; ++i) {
+    const bool in_right = (i == 2U || i == 3U || i == 4U);
+    if (in_right) {
+      assert(claim_pat[i].red > 20U && claim_pat[i].green == 0U && claim_pat[i].blue > 20U);
+    } else {
+      assert(claim_pat[i].red == 0U && claim_pat[i].green == 0U && claim_pat[i].blue == 0U);
+    }
+  }
+
   /* Erase failure ring alternates red and amber and flips phase over time. */
-  struct iterate_kit_rgb8 err0[12], err1[12];
   havpe_ring_render_erase_error(0U, err0);
   havpe_ring_render_erase_error(250U, err1);
   assert(err0[0].red > 30U && err0[0].green == 0U);
@@ -174,7 +199,6 @@ static void wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running(vo
   struct call_harness h;
   memset(&h, 0, sizeof(h));
 
-  /* Boot released and arm button. */
   assert(step_board_and_gesture(&h, false, false, 0U) == HAVPE_GESTURE_NONE);
   assert(step_board_and_gesture(&h, false, false, 40U) == HAVPE_GESTURE_NONE);
 
@@ -197,8 +221,7 @@ static void wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running(vo
   assert(step_board_and_gesture(&h, false, false, 3030U) == HAVPE_GESTURE_NONE);
   assert(!h.wants_call && !h.call_active);
 
-  /* 3) Idle -> unmuted hold aborted at 3 s: down-edge starts call, 1.5 s cancels it,
-   *    releasing early leaves NO call running. */
+  /* 3) Idle -> unmuted hold aborted at 3 s: down-edge starts call, 1.5 s cancels it. */
   assert(step_board_and_gesture(&h, true, false, 5000U) == HAVPE_GESTURE_NONE);
   assert(step_board_and_gesture(&h, true, false, 5030U) == HAVPE_GESTURE_NONE);
   assert(h.wants_call && h.call_active);
@@ -208,8 +231,7 @@ static void wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running(vo
   assert(step_board_and_gesture(&h, false, false, 8030U) == HAVPE_GESTURE_NONE);
   assert(!h.wants_call && !h.call_active);
 
-  /* 4) Idle -> full 5 s unmuted hold: call cancelled at 1.5 s, WIFI_RESET fires on
-   *    release with no call running. */
+  /* 4) Idle -> full 5 s unmuted hold: call cancelled at 1.5 s, WIFI_RESET fires with no call. */
   assert(step_board_and_gesture(&h, true, false, 10000U) == HAVPE_GESTURE_NONE);
   assert(step_board_and_gesture(&h, true, false, 10030U) == HAVPE_GESTURE_NONE);
   assert(h.wants_call);
@@ -225,8 +247,8 @@ static void wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running(vo
 int main(void) {
   ignores_boot_held_button_until_clean_release();
   unmuted_five_second_hold_resets_wifi_and_never_wipes();
-  muted_tap_unlocks_and_ten_second_hold_full_wipes();
-  renders_distinct_ring_patterns_for_modes_and_gestures();
+  muted_tap_setup_mode_dead_zone_and_full_wipe_are_distinct();
+  renders_distinct_ring_patterns_for_modes_gestures_and_claims();
   wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running();
   return 0;
 }
