@@ -1,6 +1,7 @@
 set(ITERATE_KIT_CORE_SOURCES
   src/announcer.c
   src/button.c
+  src/captive_dns.c
   src/configuration.c
   src/conversation_lights.c
   src/conversation_overlay.c
@@ -11,6 +12,7 @@ set(ITERATE_KIT_CORE_SOURCES
   src/itx_mount.c
   src/itx_outbox_sender.c
   src/peer.c
+  src/provisioning_state.c
   src/retry_gate.c
   src/session_grammar.c
   src/spsc_ring.c
@@ -20,6 +22,7 @@ set(ITERATE_KIT_CORE_SOURCES
   src/voice_playback_clock.c
   src/voice_playout.c
   src/voice_stream.c
+  src/web_portal.c
   src/websocket_client.c
   src/websocket_frame_reader.c
   src/websocket_frame_writer.c

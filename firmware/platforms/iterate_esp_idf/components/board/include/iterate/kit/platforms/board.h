@@ -107,6 +107,8 @@ bool iterate_kit_board_boot_steps(
  * exact path.
  */
 enum iterate_kit_status iterate_kit_board_set_volume(uint8_t percent, uint8_t *applied);
+/** Current applied speaker volume percentage (0..100). */
+uint8_t iterate_kit_board_current_volume(void);
 /** Keep `percent` in NVS as the level to restore at the next boot.
  * iterate_kit_board_set_volume calls it after every successful write.
  */

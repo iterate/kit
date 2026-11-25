@@ -298,6 +298,7 @@ enum iterate_kit_status iterate_kit_board_nudge_volume(int step) {
 }
 
 static uint8_t volume(void *context) { (void)context; return volume_percent; }
+uint8_t iterate_kit_board_current_volume(void) { return volume_percent; }
 static enum iterate_kit_status set_volume(void *context, uint8_t percent, uint8_t *applied) {
   (void)context;
   return iterate_kit_board_set_volume(percent, applied);

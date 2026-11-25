@@ -81,6 +81,51 @@ bool iterate_kit_platform_refresh_token_store(
     const struct iterate_kit_configuration *configuration,
     const char *token);
 
+/**
+ * Permanently disable rotated refresh-token NVS writes (latched before a full
+ * wipe so the background network task cannot commit a fresh token back to NVS
+ * between the erase and the restart).
+ */
+void iterate_kit_platform_refresh_token_disable_writes(void);
+
+/**
+ * Erase any stored rotated refresh token from NVS (on mind change or full wipe)
+ * and verify by read-back that both `token` and `seed` keys are absent.
+ */
+bool iterate_kit_platform_refresh_token_clear(void);
+
+/**
+ * Read the `iterate_kit` partition allowing partial configurations (Wi-Fi-only
+ * or mind-only). An erased partition (all 0xFF) is reported as DECODE_FAILED /
+ * INVALID_MAGIC with `presence` cleared, selecting Setup AP mode.
+ */
+struct iterate_kit_platform_provisioning_result
+iterate_kit_platform_read_stored_provisioning(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence);
+
+/**
+ * Encode `configuration` (for groups enabled in `presence`) as an ITERKIT1
+ * image, erase and write the `iterate_kit` partition, and verify read-back.
+ */
+bool iterate_kit_platform_write_provisioning(
+    const struct iterate_kit_configuration *configuration,
+    const struct iterate_kit_configuration_presence *presence);
+
+/**
+ * Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password while preserving
+ * any saved mind/project credential, rotated refresh token, and status voice.
+ * Fails closed without erasing if the partition cannot be read, then rewrites
+ * and verifies read-back.
+ */
+bool iterate_kit_platform_clear_wifi_provisioning(void);
+
+/**
+ * Full wipe: latches refresh-token NVS writes off, erases `iterate_kit`,
+ * `iterate_token`, and `kit/volume`, and verifies all three by read-back.
+ */
+bool iterate_kit_platform_wipe_provisioning(void);
+
 #ifdef __cplusplus
 }
 #endif

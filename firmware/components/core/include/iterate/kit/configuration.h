@@ -1,6 +1,7 @@
 #ifndef ITERATE_KIT_CONFIGURATION_H
 #define ITERATE_KIT_CONFIGURATION_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -103,6 +104,13 @@ enum iterate_kit_configuration_error {
   ITERATE_KIT_CONFIGURATION_INVALID_VALUE,
 };
 
+/** Which logical groups of a stored ITERKIT1 image are populated. */
+struct iterate_kit_configuration_presence {
+  bool has_wifi;
+  bool has_platform;
+  bool has_status_voice;
+};
+
 /**
  * Decodes one complete ITERKIT1 image (declared payload plus optional erased
  * partition padding). Unknown TLV tags are skipped for forward compatibility;
@@ -115,6 +123,60 @@ enum iterate_kit_configuration_error iterate_kit_configuration_decode(
     struct iterate_kit_configuration *configuration,
     const uint8_t *image,
     size_t image_size);
+
+/**
+ * Decodes an ITERKIT1 image from on-device storage, permitting Wi-Fi and/or
+ * platform credentials to be absent (for example after a Wi-Fi-only reset or
+ * before a mind has been linked). Half-credentials, mixed platforms, bad CRCs
+ * and malformed TLVs are still rejected and zero both outputs.
+ */
+enum iterate_kit_configuration_error iterate_kit_configuration_decode_stored(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence,
+    const uint8_t *image,
+    size_t image_size);
+
+/**
+ * Encodes `configuration` (for the groups enabled in `presence`) into an
+ * ITERKIT1 image in `image[0..capacity)`, filling any trailing bytes with 0xFF
+ * erased-flash padding. `*written_size` receives the unpadded image length
+ * (`16 + payload_size`). Produces byte-for-byte the same TLV order and CRC-32
+ * as Kit's TypeScript encoder (`src/firmware/config-image.ts`).
+ */
+enum iterate_kit_configuration_error iterate_kit_configuration_encode(
+    const struct iterate_kit_configuration *configuration,
+    const struct iterate_kit_configuration_presence *presence,
+    uint8_t *image,
+    size_t capacity,
+    size_t *written_size);
+
+/**
+ * Validates a Wi-Fi password under the WPA contract: empty (open network),
+ * 8..63 UTF-8 bytes, or 64 hexadecimal digits (raw PSK).
+ */
+bool iterate_kit_configuration_valid_wifi_password(const char *password);
+
+/** Strict status-voice parser for user forms; returns false for unknown names. */
+bool iterate_kit_configuration_parse_status_voice(
+    const char *name, enum iterate_kit_status_voice *voice);
+
+/**
+ * Normalizes a typed mind address or origin (`example.com`, `iterate.example.com`,
+ * `https://iterate.example.com`, `http://localhost:8788`) into the origin form
+ * `os_base_url` expects. Clears `destination` on error.
+ */
+enum iterate_kit_configuration_error
+iterate_kit_configuration_normalize_mind_origin(
+    const char *typed, char *destination, size_t capacity);
+
+/**
+ * Clears ONLY the Wi-Fi SSID and password from `configuration` and marks
+ * `presence->has_wifi = false`, preserving any saved mind/project credential
+ * and status-voice setting.
+ */
+void iterate_kit_configuration_clear_wifi(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence);
 
 /** The status-voice field's name for `voice` ("greensleeves", "off", ...). */
 const char *iterate_kit_status_voice_name(enum iterate_kit_status_voice voice);

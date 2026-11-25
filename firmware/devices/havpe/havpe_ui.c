@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "havpe_dial.h"
+#include "havpe_portal.h"
 
 static const char tag[] = "havpe-ui";
 
@@ -80,6 +81,11 @@ void havpe_ui_present(const struct iterate_kit_voice_view *view) {
    * intermediate quadrature states are lost counts. */
   dial.steps += havpe_dial_decoder_step(
       &dial.decoder, gpio_get_level(DIAL_A_GPIO) != 0, gpio_get_level(DIAL_B_GPIO) != 0);
+  havpe_portal_poll_normal(
+      view,
+      gpio_get_level(0) == 0,
+      gpio_get_level(3) != 0,
+      (uint64_t)(esp_timer_get_time() / 1000));
   /* A twelve-pixel ring cannot render prose, so the console carries the
    * status word: ONCE PER CHANGE. Logging it every 5 ms pass (the table
    * step's first boot printed it 5,749 times in 75 s) buries every other

@@ -14,8 +14,12 @@
 
 #include "iterate/kit/platforms/board.h"
 #include "iterate/kit/platforms/aic3204.h"
+#include "iterate/kit/platforms/provisioning.h"
 #include "iterate/kit/platforms/xmos_i2c.h"
+#include "iterate/kit/provisioning_state.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "havpe_portal.h"
 #include "havpe_ui.h"
 
 /*
@@ -139,6 +143,11 @@ static void poll(void *context, struct iterate_kit_voice_intent *out) {
   out->microphone_muted = gpio_get_level(3) != 0;
   const int steps = havpe_ui_take_dial();
   if (steps != 0) (void)iterate_kit_board_nudge_volume(steps * DIAL_VOLUME_STEP_PERCENT);
+}
+
+/** End any call opened by the down-edge once a centre-button hold enters Wi-Fi reset. */
+static void read_gestures(struct iterate_kit_board_gestures *out) {
+  if (havpe_portal_take_cancel_call()) out->end_press = true;
 }
 
 /* --- the XMOS pipeline, as something a person can move and then measure ---- */
@@ -273,6 +282,7 @@ static const struct iterate_kit_board board = {
   .ring = {.gpio = 21, .pixels = 12, .power_gpio = 45},
   .status_led_gpio = -1,
   .button = {.gpio = 0, .active_low = true},
+  .read_gestures = read_gestures,
   .wake_word = "jarvis",
   .sounds = {.wake = sound_chime_press, .wake_bytes = sizeof(sound_chime_press),
     .speech_peak = ITERATE_KIT_SPEECH_PEAK},
@@ -280,7 +290,46 @@ static const struct iterate_kit_board board = {
   .extra = &ops,
 };
 
-/** ESP-IDF entry point: run this board through the shared voice loop. */
+/** ESP-IDF entry point: select Setup AP, LAN Awaiting-Mind, or Normal voice mode. */
 void app_main(void) {
-  iterate_kit_board_run(&board);
+  esp_err_t nvs = nvs_flash_init();
+  if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs = nvs_flash_erase();
+    if (nvs == ESP_OK) nvs = nvs_flash_init();
+  }
+  if (nvs != ESP_OK) ESP_LOGE(tag, "NVS not started: %s", esp_err_to_name(nvs));
+
+  struct iterate_kit_configuration stored_cfg;
+  struct iterate_kit_configuration_presence presence;
+  const struct iterate_kit_platform_provisioning_result stored =
+      iterate_kit_platform_read_stored_provisioning(&stored_cfg, &presence);
+
+  if (stored.status != ITERATE_KIT_PLATFORM_PROVISIONING_OK) {
+    ESP_LOGW(
+        tag,
+        "device is not provisioned: storage=%s — entering Setup Mode",
+        iterate_kit_platform_provisioning_status_name(stored.status));
+  } else if (!presence.has_wifi) {
+    ESP_LOGW(tag, "Wi-Fi is not configured (mind preserved) — entering Setup Mode");
+  } else if (!presence.has_platform) {
+    ESP_LOGI(tag, "Wi-Fi configured, mind not linked — entering LAN awaiting-mind mode");
+  }
+
+  const bool setup_once = havpe_portal_consume_setup_ap_request();
+  if (setup_once) {
+    ESP_LOGI(tag, "one-boot Setup Mode requested by physical gesture — keeping saved credentials");
+  }
+
+  switch (iterate_kit_provisioning_select_boot_mode(&presence, setup_once)) {
+    case ITERATE_KIT_BOOT_MODE_SETUP_AP:
+      havpe_portal_run_setup_ap(&board.ring, &stored_cfg, &presence);
+      return;
+    case ITERATE_KIT_BOOT_MODE_LAN_UNLINKED:
+      havpe_portal_run_lan_unlinked(&board.ring, &stored_cfg, &presence);
+      return;
+    case ITERATE_KIT_BOOT_MODE_NORMAL:
+      havpe_portal_prepare_normal(&stored_cfg, &presence);
+      iterate_kit_board_run(&board);
+      return;
+  }
 }

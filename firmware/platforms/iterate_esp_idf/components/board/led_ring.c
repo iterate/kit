@@ -46,10 +46,14 @@ static struct {
   led_strip_handle_t strip;
   uint8_t pixels;
   bool painted;
+  uint32_t refresh_seq;
+  bool last_refresh_ok;
   int64_t last_refresh_us;
   struct iterate_kit_rgb8 shown[12];
   struct iterate_kit_rgb8 volume[12];
   int64_t volume_until_us;
+  struct iterate_kit_rgb8 custom[12];
+  int64_t custom_until_us;
   struct iterate_kit_conversation_ring animation;
 } ring;
 
@@ -93,33 +97,59 @@ void iterate_kit_led_ring_show_volume(uint8_t percent, uint32_t hold_ms) {
   ring.volume_until_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
 }
 
+void iterate_kit_led_ring_show_pixels(
+    const struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT],
+    uint32_t hold_ms) {
+  if (pixels == NULL) return;
+  memcpy(ring.custom, pixels, sizeof(ring.custom));
+  ring.custom_until_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
+}
+
+static bool record_refresh(bool ok) {
+  if (!ok) ring.painted = false;
+  ring.last_refresh_ok = ok;
+  ++ring.refresh_seq;
+  return ok;
+}
+
+bool iterate_kit_led_ring_last_refresh(uint32_t *out_seq, bool *out_ok) {
+  if (out_seq != NULL) *out_seq = ring.refresh_seq;
+  if (out_ok != NULL) *out_ok = ring.last_refresh_ok;
+  return ring.refresh_seq != 0U;
+}
+
 bool iterate_kit_led_ring_present(
     const struct iterate_kit_conversation_visual_state *state, int64_t now_us) {
-  if (ring.strip == NULL || now_us - ring.last_refresh_us < 50000) return false;
+  if (ring.strip == NULL) return record_refresh(false);
+  if (now_us - ring.last_refresh_us < 50000) return false;
 
   struct iterate_kit_rgb8 lights[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
-  iterate_kit_conversation_ring_animate(
-      &ring.animation, state, (uint32_t)(now_us / 1000), lights);
-  const bool system_override = state != NULL &&
-      (state->media_failed || state->microphone_muted || state->restart_armed);
-  if (!system_override && now_us < ring.volume_until_us) {
-    memcpy(lights, ring.volume, sizeof(lights));
+  if (now_us < ring.custom_until_us) {
+    memcpy(lights, ring.custom, sizeof(lights));
+  } else {
+    iterate_kit_conversation_ring_animate(
+        &ring.animation, state, (uint32_t)(now_us / 1000), lights);
+    const bool system_override = state != NULL &&
+        (state->media_failed || state->microphone_muted || state->restart_armed);
+    if (!system_override && now_us < ring.volume_until_us) {
+      memcpy(lights, ring.volume, sizeof(lights));
+    }
   }
 
   /* This is the animation cadence even when pixels are unchanged or the RMT
    * refresh fails: retry on the next bounded frame, never in a tight loop. */
   ring.last_refresh_us = now_us;
-  if (!iterate_kit_led_ring_dirty(ring.painted, ring.shown, lights)) return true;
+  if (!iterate_kit_led_ring_dirty(ring.painted, ring.shown, lights)) return record_refresh(true);
 
   struct iterate_kit_rgb8 pixels[252]; /* largest multiple of twelve in uint8_t */
-  if (!iterate_kit_led_ring_repeat(lights, ring.pixels, pixels)) return false;
+  if (!iterate_kit_led_ring_repeat(lights, ring.pixels, pixels)) return record_refresh(false);
   for (uint8_t index = 0U; index < ring.pixels; ++index) {
     (void)led_strip_set_pixel(ring.strip, index,
         pixels[index].red, pixels[index].green, pixels[index].blue);
   }
-  if (led_strip_refresh(ring.strip) != ESP_OK) return false;
+  if (led_strip_refresh(ring.strip) != ESP_OK) return record_refresh(false);
   ring.painted = true;
   memcpy(ring.shown, lights, sizeof(lights));
-  return true;
+  return record_refresh(true);
 }
 #endif

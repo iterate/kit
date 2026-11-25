@@ -294,9 +294,126 @@ static void refuses_mixed_or_half_credentials(void) {
   assert(configuration.oauth_client_id[0] == '\0');
 }
 
+static void encodes_byte_for_byte_with_typescript_golden_images(void) {
+  struct iterate_kit_configuration cfg;
+  struct iterate_kit_configuration_presence presence;
+  uint8_t encoded[512];
+  size_t written = 0U;
+
+  /* Project golden image (no status-voice field). */
+  assert(iterate_kit_configuration_decode_stored(
+      &cfg, &presence, iterate_kit_test_configuration_image,
+      sizeof(iterate_kit_test_configuration_image)) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(presence.has_wifi && presence.has_platform && !presence.has_status_voice);
+  assert(iterate_kit_configuration_encode(
+      &cfg, &presence, encoded, sizeof(encoded), &written) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(written == sizeof(iterate_kit_test_configuration_image));
+  assert(memcmp(encoded, iterate_kit_test_configuration_image, written) == 0);
+  for (size_t i = written; i < sizeof(encoded); ++i) assert(encoded[i] == 0xffU);
+
+  /* Mind golden image (with status-voice = spoken). */
+  assert(iterate_kit_configuration_decode_stored(
+      &cfg, &presence, iterate_kit_test_mind_configuration_image,
+      sizeof(iterate_kit_test_mind_configuration_image)) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(presence.has_wifi && presence.has_platform && presence.has_status_voice);
+  assert(iterate_kit_configuration_encode(
+      &cfg, &presence, encoded, sizeof(encoded), &written) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(written == sizeof(iterate_kit_test_mind_configuration_image));
+  assert(memcmp(encoded, iterate_kit_test_mind_configuration_image, written) == 0);
+}
+
+static void round_trips_partial_wifi_only_and_wifi_reset_images(void) {
+  struct iterate_kit_configuration cfg;
+  struct iterate_kit_configuration_presence presence;
+  struct iterate_kit_configuration decoded;
+  struct iterate_kit_configuration_presence decoded_presence;
+  uint8_t image[512];
+  size_t written = 0U;
+
+  /* Wi-Fi only (after SoftAP setup, before linking a mind). */
+  memset(&cfg, 0, sizeof(cfg));
+  memset(&presence, 0, sizeof(presence));
+  memcpy(cfg.wifi_ssid, "home-net", sizeof("home-net"));
+  memcpy(cfg.wifi_password, "passphrase123", sizeof("passphrase123"));
+  cfg.status_voice = ITERATE_KIT_STATUS_VOICE_SPOKEN;
+  presence.has_wifi = true;
+  presence.has_status_voice = true;
+
+  assert(iterate_kit_configuration_encode(&cfg, &presence, image, sizeof(image), &written) ==
+         ITERATE_KIT_CONFIGURATION_OK);
+  assert(iterate_kit_configuration_decode_stored(&decoded, &decoded_presence, image, sizeof(image)) ==
+         ITERATE_KIT_CONFIGURATION_OK);
+  assert(decoded_presence.has_wifi && !decoded_presence.has_platform &&
+         decoded_presence.has_status_voice);
+  assert(strcmp(decoded.wifi_ssid, "home-net") == 0);
+  assert(strcmp(decoded.wifi_password, "passphrase123") == 0);
+  assert(decoded.status_voice == ITERATE_KIT_STATUS_VOICE_SPOKEN);
+  /* Strict decoder still refuses an image without a platform credential. */
+  assert(iterate_kit_configuration_decode(&decoded, image, sizeof(image)) ==
+         ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+
+  /* Wi-Fi reset clears ONLY Wi-Fi while preserving mind credential & status voice. */
+  assert(iterate_kit_configuration_decode_stored(
+      &cfg, &presence, iterate_kit_test_mind_configuration_image,
+      sizeof(iterate_kit_test_mind_configuration_image)) == ITERATE_KIT_CONFIGURATION_OK);
+  iterate_kit_configuration_clear_wifi(&cfg, &presence);
+  assert(!presence.has_wifi && presence.has_platform);
+  assert(cfg.wifi_ssid[0] == '\0' && cfg.wifi_password[0] == '\0');
+  assert(iterate_kit_configuration_encode(&cfg, &presence, image, sizeof(image), &written) ==
+         ITERATE_KIT_CONFIGURATION_OK);
+  assert(iterate_kit_configuration_decode_stored(&decoded, &decoded_presence, image, sizeof(image)) ==
+         ITERATE_KIT_CONFIGURATION_OK);
+  assert(!decoded_presence.has_wifi && decoded_presence.has_platform);
+  assert(decoded.platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND);
+  assert(strcmp(decoded.os_base_url, "https://iterate.example.com") == 0);
+  assert(strcmp(decoded.oauth_refresh_token, "user_1:grant_1:secret") == 0);
+  assert(decoded.status_voice == ITERATE_KIT_STATUS_VOICE_SPOKEN);
+}
+
+static void validates_passwords_status_voices_and_mind_origins(void) {
+  char origin[ITERATE_KIT_OS_BASE_URL_CAPACITY];
+  enum iterate_kit_status_voice voice;
+
+  assert(iterate_kit_configuration_valid_wifi_password(""));
+  assert(iterate_kit_configuration_valid_wifi_password("12345678"));
+  assert(!iterate_kit_configuration_valid_wifi_password("1234567"));
+  assert(iterate_kit_configuration_valid_wifi_password(
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+  assert(!iterate_kit_configuration_valid_wifi_password(
+      "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"));
+
+  assert(iterate_kit_configuration_parse_status_voice("spoken", &voice) &&
+         voice == ITERATE_KIT_STATUS_VOICE_SPOKEN);
+  assert(iterate_kit_configuration_parse_status_voice("off", &voice) &&
+         voice == ITERATE_KIT_STATUS_VOICE_OFF);
+  assert(!iterate_kit_configuration_parse_status_voice("sea-shanty", &voice));
+
+  assert(iterate_kit_configuration_normalize_mind_origin(
+      "  Example.COM  ", origin, sizeof(origin)) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(strcmp(origin, "https://iterate.example.com") == 0);
+  assert(iterate_kit_configuration_normalize_mind_origin(
+      "iterate.example.com/", origin, sizeof(origin)) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(strcmp(origin, "https://iterate.example.com") == 0);
+  assert(iterate_kit_configuration_normalize_mind_origin(
+      "https://iterate.example.com/", origin, sizeof(origin)) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(strcmp(origin, "https://iterate.example.com") == 0);
+  assert(iterate_kit_configuration_normalize_mind_origin(
+      "http://localhost:8788", origin, sizeof(origin)) == ITERATE_KIT_CONFIGURATION_OK);
+  assert(strcmp(origin, "http://localhost:8788") == 0);
+  assert(iterate_kit_configuration_normalize_mind_origin(
+      "https://iterate.example.com/bad", origin, sizeof(origin)) ==
+      ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+  assert(origin[0] == '\0');
+  assert(iterate_kit_configuration_normalize_mind_origin(
+      "nodot", origin, sizeof(origin)) == ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+}
+
 int main(void) {
   decodes_the_typescript_mind_image();
   refuses_mixed_or_half_credentials();
+  encodes_byte_for_byte_with_typescript_golden_images();
+  round_trips_partial_wifi_only_and_wifi_reset_images();
+  validates_passwords_status_voices_and_mind_origins();
   decodes_the_typescript_golden_image();
   decodes_the_status_voice_and_defaults_what_it_does_not_know();
   decodes_the_flashed_image_with_an_unprefixed_project_and_a_full_length_key();
