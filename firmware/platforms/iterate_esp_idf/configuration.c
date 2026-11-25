@@ -3,6 +3,8 @@
 
 #include "esp_partition.h"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 
 #include <stdio.h>
@@ -150,6 +152,37 @@ const char *iterate_kit_platform_provisioning_status_name(
  */
 static const char token_namespace[] = "iterate_token";
 
+/*
+ * Serializes all writes and erases on `iterate_token` across `iterate-net`
+ * (token refresh) and the app/portal task (mind update or full wipe). Once
+ * `refresh_token_writes_disabled` is latched for a full wipe, no concurrent or
+ * subsequent token refresh can commit a credential back into NVS before reboot.
+ */
+static portMUX_TYPE token_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t token_mutex_buf;
+static SemaphoreHandle_t token_mutex;
+static bool refresh_token_writes_disabled;
+
+static SemaphoreHandle_t get_token_mutex(void) {
+  SemaphoreHandle_t m = __atomic_load_n(&token_mutex, __ATOMIC_ACQUIRE);
+  if (m != NULL) return m;
+  portENTER_CRITICAL(&token_mutex_init_lock);
+  if (token_mutex == NULL) {
+    token_mutex = xSemaphoreCreateMutexStatic(&token_mutex_buf);
+  }
+  m = token_mutex;
+  portEXIT_CRITICAL(&token_mutex_init_lock);
+  return m;
+}
+
+void iterate_kit_platform_refresh_token_disable_writes(void) {
+  __atomic_store_n(&refresh_token_writes_disabled, true, __ATOMIC_SEQ_CST);
+}
+
+bool iterate_kit_platform_refresh_token_writes_disabled(void) {
+  return __atomic_load_n(&refresh_token_writes_disabled, __ATOMIC_SEQ_CST);
+}
+
 static void seed_digest(const char *seed, char digest[9]) {
   uint32_t hash = UINT32_C(2166136261);
   for (const unsigned char *cursor = (const unsigned char *)seed; *cursor != '\0'; ++cursor) {
@@ -186,18 +219,24 @@ bool iterate_kit_platform_refresh_token_store(
     const char *token) {
   nvs_handle_t handle;
   char digest[9];
-  bool stored;
+  bool stored = false;
   if (configuration == NULL || token == NULL || token[0] == '\0') return false;
-  if (nvs_open(token_namespace, NVS_READWRITE, &handle) != ESP_OK) return false;
-  seed_digest(configuration->oauth_refresh_token, digest);
-  stored = nvs_set_str(handle, "seed", digest) == ESP_OK &&
-      nvs_set_str(handle, "token", token) == ESP_OK &&
-      nvs_commit(handle) == ESP_OK;
-  nvs_close(handle);
+  if (iterate_kit_platform_refresh_token_writes_disabled()) return false;
+  SemaphoreHandle_t lock = get_token_mutex();
+  if (lock == NULL || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE) return false;
+  if (!iterate_kit_platform_refresh_token_writes_disabled() &&
+      nvs_open(token_namespace, NVS_READWRITE, &handle) == ESP_OK) {
+    seed_digest(configuration->oauth_refresh_token, digest);
+    stored = nvs_set_str(handle, "seed", digest) == ESP_OK &&
+        nvs_set_str(handle, "token", token) == ESP_OK &&
+        nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+  }
+  xSemaphoreGive(lock);
   return stored;
 }
 
-bool iterate_kit_platform_refresh_token_clear(void) {
+static bool refresh_token_clear_locked(void) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(token_namespace, NVS_READWRITE, &handle);
   if (err == ESP_OK) {
@@ -219,6 +258,14 @@ bool iterate_kit_platform_refresh_token_clear(void) {
   const esp_err_t seed_err = nvs_get_str(handle, "seed", NULL, &size);
   nvs_close(handle);
   return tok_err == ESP_ERR_NVS_NOT_FOUND && seed_err == ESP_ERR_NVS_NOT_FOUND;
+}
+
+bool iterate_kit_platform_refresh_token_clear(void) {
+  SemaphoreHandle_t lock = get_token_mutex();
+  if (lock == NULL || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE) return false;
+  const bool ok = refresh_token_clear_locked();
+  xSemaphoreGive(lock);
+  return ok;
 }
 
 static bool verify_partition_erased(const esp_partition_t *partition) {
@@ -359,29 +406,42 @@ bool iterate_kit_platform_write_provisioning(
 bool iterate_kit_platform_clear_wifi_provisioning(void) {
   struct iterate_kit_configuration cfg;
   struct iterate_kit_configuration_presence presence;
+  const esp_partition_t *partition = esp_partition_find_first(
+      (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
+      (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
+      iterate_kit_partition_label);
   const struct iterate_kit_platform_provisioning_result loaded =
       iterate_kit_platform_read_stored_provisioning(&cfg, &presence);
   if (loaded.status != ITERATE_KIT_PLATFORM_PROVISIONING_OK) {
-    /* Already unprovisioned or corrupt: erase the partition and verify all 0xFF. */
-    const esp_partition_t *partition = esp_partition_find_first(
-        (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
-        (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
-        iterate_kit_partition_label);
-    return partition != NULL &&
-        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK &&
-        verify_partition_erased(partition);
+    /*
+     * Fail closed on ANY read failure (such as transient mmap failure or a
+     * corrupt image) without erasing `iterate_kit`, so a Wi-Fi-only reset can
+     * never destroy a valid mind pairing. Only a partition that is ALREADY
+     * completely erased (all 0xFF) counts as already having no Wi-Fi.
+     */
+    if (loaded.status == ITERATE_KIT_PLATFORM_PROVISIONING_DECODE_FAILED &&
+        loaded.configuration_error == ITERATE_KIT_CONFIGURATION_INVALID_MAGIC &&
+        verify_partition_erased(partition)) {
+      return true;
+    }
+    return false;
+  }
+  if (!presence.has_wifi) {
+    memset(&cfg, 0, sizeof(cfg));
+    return true;
   }
   iterate_kit_configuration_clear_wifi(&cfg, &presence);
   if (!presence.has_platform && !presence.has_status_voice) {
-    const esp_partition_t *partition = esp_partition_find_first(
-        (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
-        (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
-        iterate_kit_partition_label);
     memset(&cfg, 0, sizeof(cfg));
     return partition != NULL &&
         esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK &&
         verify_partition_erased(partition);
   }
+  /*
+   * `iterate_kit` is a single 4 KiB SPI-flash erase sector, so rewriting it in
+   * place has an unavoidable erase-to-write power-loss window (documented in
+   * `provisioning.md`). Read back immediately afterwards to verify Wi-Fi is gone.
+   */
   const bool wrote = iterate_kit_platform_write_provisioning(&cfg, &presence);
   memset(&cfg, 0, sizeof(cfg));
   if (!wrote) return false;
@@ -404,6 +464,12 @@ bool iterate_kit_platform_wipe_provisioning(void) {
       (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
       (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
       iterate_kit_partition_label);
+  /*
+   * Permanently latch refresh-token writes off BEFORE acquiring `token_mutex`
+   * and erasing `iterate_token`, so `itx_transport` on `iterate-net` can
+   * neither interleave with nor write a fresh rotated token after verification.
+   */
+  iterate_kit_platform_refresh_token_disable_writes();
   const bool token_ok = iterate_kit_platform_refresh_token_clear();
   const bool volume_ok = clear_and_verify_nvs_volume();
   const bool partition_ok = partition != NULL &&
@@ -418,27 +484,68 @@ bool iterate_kit_platform_setup_code_load_or_create(
     char out[ITERATE_KIT_SETUP_CODE_CAPACITY]) {
   nvs_handle_t handle;
   char stored[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
+  char candidate[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
+  char verify[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
   size_t size = sizeof(stored);
   uint8_t entropy[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES];
   if (out == NULL) return false;
   out[0] = '\0';
-  if (nvs_open(setup_namespace, NVS_READONLY, &handle) == ESP_OK) {
-    const esp_err_t err = nvs_get_str(handle, "code", stored, &size);
+
+  esp_err_t err = nvs_open(setup_namespace, NVS_READONLY, &handle);
+  if (err == ESP_OK) {
+    const esp_err_t get_err = nvs_get_str(handle, "code", stored, &size);
     nvs_close(handle);
-    if (err == ESP_OK && iterate_kit_setup_code_valid(stored)) {
+    if (get_err == ESP_OK && iterate_kit_setup_code_valid(stored)) {
       memcpy(out, stored, ITERATE_KIT_SETUP_CODE_CAPACITY);
       memset(stored, 0, sizeof(stored));
       return true;
     }
+    memset(stored, 0, sizeof(stored));
+    if (get_err != ESP_ERR_NVS_NOT_FOUND) {
+      return false;
+    }
+  } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+    return false;
   }
+
   /* Caller guarantees Wi-Fi RF is active so esp_fill_random uses HWRNG noise. */
   esp_fill_random(entropy, sizeof(entropy));
-  iterate_kit_setup_code_format(entropy, out);
+  iterate_kit_setup_code_format(entropy, candidate);
   memset(entropy, 0, sizeof(entropy));
-  if (nvs_open(setup_namespace, NVS_READWRITE, &handle) == ESP_OK) {
-    (void)nvs_set_str(handle, "code", out);
-    (void)nvs_commit(handle);
+  if (!iterate_kit_setup_code_valid(candidate)) {
+    memset(candidate, 0, sizeof(candidate));
+    return false;
+  }
+
+  /* Persist to NVS AND require commit + read-back verification before use so
+   * Setup Mode never starts with an ephemeral passphrase that fails after reboot. */
+  if (nvs_open(setup_namespace, NVS_READWRITE, &handle) != ESP_OK) {
+    memset(candidate, 0, sizeof(candidate));
+    return false;
+  }
+  const bool committed =
+      nvs_set_str(handle, "code", candidate) == ESP_OK &&
+      nvs_commit(handle) == ESP_OK;
+  nvs_close(handle);
+  if (!committed) {
+    memset(candidate, 0, sizeof(candidate));
+    return false;
+  }
+
+  size_t verify_size = sizeof(verify);
+  bool verified = false;
+  if (nvs_open(setup_namespace, NVS_READONLY, &handle) == ESP_OK) {
+    verified = nvs_get_str(handle, "code", verify, &verify_size) == ESP_OK &&
+        iterate_kit_setup_code_valid(verify) &&
+        strcmp(verify, candidate) == 0;
     nvs_close(handle);
   }
-  return iterate_kit_setup_code_valid(out);
+  if (verified) {
+    memcpy(out, verify, ITERATE_KIT_SETUP_CODE_CAPACITY);
+  } else {
+    memset(out, 0, ITERATE_KIT_SETUP_CODE_CAPACITY);
+  }
+  memset(candidate, 0, sizeof(candidate));
+  memset(verify, 0, sizeof(verify));
+  return verified;
 }

@@ -843,6 +843,12 @@ static enum iterate_kit_token_refresh_result refresh_access_token(
         &transport->token_refresh_failures);
     return result;
   }
+  if (iterate_kit_platform_refresh_token_writes_disabled()) {
+    /* A full wipe has latched token writes off; drop in-memory secrets and abort. */
+    memset(&transport->tokens, 0, sizeof(transport->tokens));
+    memset(transport->refresh_token, 0, sizeof(transport->refresh_token));
+    return ITERATE_KIT_TOKEN_REFRESH_FAILED;
+  }
   if (strcmp(transport->tokens.refresh_token, transport->refresh_token) != 0) {
     (void)snprintf(
         transport->refresh_token,

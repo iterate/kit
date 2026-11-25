@@ -82,6 +82,15 @@ bool iterate_kit_platform_refresh_token_store(
     const char *token);
 
 /**
+ * Permanently disable rotated refresh-token NVS writes (latched before a full
+ * wipe so the background network task cannot commit a fresh token back to NVS
+ * after the erase has been verified).
+ */
+void iterate_kit_platform_refresh_token_disable_writes(void);
+
+bool iterate_kit_platform_refresh_token_writes_disabled(void);
+
+/**
  * Erase any stored rotated refresh token from NVS (on mind change or full wipe)
  * and verify by read-back that both `token` and `seed` keys are absent.
  */
@@ -108,21 +117,25 @@ bool iterate_kit_platform_write_provisioning(
 /**
  * Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password while preserving
  * any saved mind/project credential, rotated refresh token, and status voice.
- * If no mind/project or status voice was saved, erases the partition cleanly.
+ * Fails closed without erasing the partition if the current configuration
+ * cannot be read (e.g. transient mmap failure or corrupt image).
  */
 bool iterate_kit_platform_clear_wifi_provisioning(void);
 
 /**
- * Full wipe: erase the `iterate_kit` partition, drop any rotated refresh token
- * in NVS (`iterate_token`), and reset kept speaker volume. Preserves the
+ * Full wipe: permanently disables refresh-token NVS writes (serializing with
+ * any in-flight `itx_transport` token commit), erases the `iterate_kit`
+ * partition, drops any rotated refresh token in NVS (`iterate_token`), resets
+ * kept speaker volume, and verifies all three by read-back. Preserves the
  * per-device setup code in NVS so the physical QR/setup card stays valid.
  */
 bool iterate_kit_platform_wipe_provisioning(void);
 
 /**
  * Load the per-device 14-char setup code (`xxxx-xxxx-xxxx`, 60 bits) from NVS
- * (`kit_setup`), or generate one with `esp_fill_random()` on first boot and
- * persist it.
+ * (`kit_setup`), or generate one with `esp_fill_random()` on first boot,
+ * commit it to NVS, and verify it by reading it back from NVS before use.
+ * Returns false and zeroes `out` if persistence or read-back fails.
  *
  * PRECONDITION: Wi-Fi/BT RF must already be started (or `bootloader_random`
  * enabled) before calling this so `esp_fill_random()` draws from the hardware

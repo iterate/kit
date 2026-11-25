@@ -61,10 +61,11 @@ Each preloaded HAVPE ships with a small printed card (or bottom sticker) showing
      2. Refresh `http://iterate-<id>.local/` and click **Request pairing pattern**. The browser
         shows a colour and ring quadrant (for example _Magenta at Right (3 o'clock)_) and the puck's
         LED ring lights up the exact colour and quadrant of the claim it holds.
-     3. Verify the puck's ring matches your browser, then keep Mute ON and short-tap the centre
-        button again (**Tap 2** — 2 s green confirmation pulse). Only that confirmed browser gets a
-        3-minute session for Status Voice and Volume. Anything else (sliding Mute OFF, holding a
-        button, clicking Cancel, or letting 30 s expire) cancels cleanly with zero write access.
+     3. Verify the puck's ring matches your browser (the pattern must be displayed on the ring for at
+        least **2 s** before a tap counts), then keep Mute ON and short-tap the centre button again
+        (**Tap 2** — 2 s green confirmation pulse). Only that confirmed browser gets a 3-minute
+        session for Status Voice and Volume. Anything else (sliding Mute OFF, holding a button,
+        clicking Cancel, or letting 30 s expire) cancels cleanly with zero write access.
 6. **Reconnect a Mind or change Wi-Fi later (physical gesture -> encrypted Setup Mode).**
    - No LAN client can enter Setup Mode, reset Wi-Fi, reboot, or touch credentials.
    - Slide **Mute ON** and hold the centre button **3 s** (release during the **violet blink**,
@@ -74,13 +75,13 @@ Each preloaded HAVPE ships with a small printed card (or bottom sticker) showing
 
 ### Physical gestures (no screen)
 
-| Action                          | Physical gesture                                                                | Ring feedback                                                                                                      | What changes                                                                                                                                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **LAN browser pairing**         | Mute switch **ON**, short tap (`< 1.5 s`) twice with visual ring check          | Tap 1: calm breathing white (`30 s`); after browser requests: 3-LED quadrant arc in colour; Tap 2: 2 s green pulse | Tap 1 opens a 30 s claim slot; browser requests a random colour+quadrant shown on the ring; Tap 2 confirms **only** that browser for 3 min (Status Voice & Volume only). Sliding Mute OFF or anything else cancels |
-| **Enter Setup Mode (no erase)** | Mute switch **ON**, hold centre button **3 s** (release between 3 s and 6 s)    | Violet arc fills `1.5–3 s`, then rapid violet blink (`3–6 s`); 3 violet flashes on trigger                         | Arms a one-boot RTC flag and reboots into the encrypted WPA2 SoftAP **without** erasing saved Wi-Fi or Mind credentials. Releasing during `6–10 s` (growing red arc) is a safe dead-zone that does nothing         |
-| **Wi-Fi reset**                 | Mute switch **OFF**, hold centre button **5 s** (release between 5 s and 10 s)  | Cyan arc fills `1.5–5 s`, then rapid cyan blink (`5–10 s`); 3 cyan flashes on verified clear                       | Latches writes off immediately (never waits for HTTP handlers), clears RAM Wi-Fi, clears **only** Wi-Fi SSID/password from flash, verifies read-back (preserving mind, rotated token, voice, and card code)        |
-| **Full wipe**                   | Mute switch **ON**, hold centre button **10 s** (release between 10 s and 15 s) | Red arc fills `6–10 s`, then rapid red blink (`10–15 s`); 3 red flashes on verified erase                          | Latches writes off immediately (never waits for HTTP handlers), zeroes RAM credentials, erases `iterate_kit` + NVS `iterate_token` + NVS `kit/volume`, verifies all three by read-back (preserves card code)       |
-| **Erase failure**               | (If flash or NVS erase / read-back verification fails)                          | Alternating **red / amber fault ring** continuously (never plays success flashes, never reboots okay)              | Leaves writes permanently disabled so the user is never misled into thinking credentials were erased before handing the board on                                                                                   |
+| Action                          | Physical gesture                                                                | Ring feedback                                                                                                                             | What changes                                                                                                                                                                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **LAN browser pairing**         | Mute switch **ON**, short tap (`< 1.5 s`) twice with visual ring check          | Tap 1: calm breathing white (`30 s`); after browser requests: 3-LED quadrant arc in colour; Tap 2 (after `>= 2 s` shown): 2 s green pulse | Tap 1 opens a 30 s claim slot; browser requests a random colour+quadrant shown on the ring; Tap 2 confirms **only** that displayed claim ID once shown for `>= 2 s` (3 min, Status Voice & Volume only). Sliding Mute OFF or anything else cancels |
+| **Enter Setup Mode (no erase)** | Mute switch **ON**, hold centre button **3 s** (release between 3 s and 6 s)    | Violet arc fills `1.5–3 s`, then rapid violet blink (`3–6 s`); 3 violet flashes on trigger                                                | Arms a one-boot RTC flag and reboots into the encrypted WPA2 SoftAP **without** erasing saved Wi-Fi or Mind credentials. Releasing during `6–10 s` (growing red arc) is a safe dead-zone that does nothing                                         |
+| **Wi-Fi reset**                 | Mute switch **OFF**, hold centre button **5 s** (release between 5 s and 10 s)  | Cyan arc fills `1.5–5 s`, then rapid cyan blink (`5–10 s`); 3 cyan flashes on verified clear                                              | Latches writes off immediately, clears RAM Wi-Fi, fails closed without erasing on any read error, otherwise rewrites `iterate_kit` without Wi-Fi and verifies read-back (preserving mind, rotated token, voice, and card code)                     |
+| **Full wipe**                   | Mute switch **ON**, hold centre button **10 s** (release between 10 s and 15 s) | Red arc fills `6–10 s`, then rapid red blink (`10–15 s`); 3 red flashes on verified erase                                                 | Latches portal writes AND `itx_transport` NVS refresh-token writes off (serialized by mutex), zeroes RAM credentials, erases `iterate_kit` + NVS `iterate_token` + NVS `kit/volume`, verifies all three by read-back (preserves card code)         |
+| **Erase failure**               | (If flash or NVS erase / read-back verification fails)                          | Alternating **red / amber fault ring** continuously (never plays success flashes, never reboots okay)                                     | Leaves writes permanently disabled so the user is never misled into thinking credentials were erased before handing the board on                                                                                                                   |
 
 Holding past the upper bound (`> 10 s` unmuted, `> 15 s` muted) or toggling the mute switch
 mid-hold cancels safely instead of escalating. A button held at power-on (e.g. GPIO0 boot strap)
@@ -154,16 +155,24 @@ leaves a call running.
   attacker.
 - **Visual out-of-band confirmation prevents blind claim hijacking:** A LAN browser cannot light up
   the ring without physical Tap 1 first, and claiming a window (`POST /claim-request`) gives **zero
-  write access** until physical Tap 2 confirms it. If a LAN attacker races Tap 1 and claims first,
-  the puck displays the attacker's random colour+quadrant (4 colours × 4 quadrants = 16 patterns),
-  while the owner's browser shows _"Another browser has a pending pairing request"_ and never shows
-  that pattern. Seeing no match, the owner slides Mute OFF (or waits 30 s) to cancel the attacker's
-  claim without ever granting writes.
+  write access** until physical Tap 2 confirms it. Each claim gets a unique `claim_id` and must
+  match the exact `claim_id` last rendered by the LED ring **and** have been displayed on the ring
+  for at least **2 seconds** (`ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS`), so a last-millisecond claim
+  arriving between the last ring update and a button release can never be confirmed unseen. If a LAN
+  attacker races Tap 1 and claims first, the puck displays the attacker's random colour+quadrant (4
+  colours × 4 quadrants = 16 patterns), while the owner's browser shows _"Another browser has a
+  pending pairing request"_ and never shows that pattern. Seeing no match, the owner slides Mute OFF
+  (or waits 30 s) to cancel the attacker's claim without ever granting writes.
   - _Residual trade-off on plain-HTTP LAN:_ A hostile on-path LAN attacker who can sniff plain HTTP
     traffic after the owner completes Tap 2 can still read that browser's `kit_sid` cookie for the
     remainder of the 3-minute window; that lets them change only Status Voice or Speaker Volume
     (never credentials, never Wi-Fi reset, never Setup Mode, never reboot, and never the SoftAP
     passphrase).
+- **Persistent setup-code verification before opening Setup Mode:** On first boot, the 60-bit SoftAP
+  passphrase is committed to NVS (`kit_setup/code`) and **read back from NVS** before Setup Mode
+  logs it or starts the SoftAP. If NVS open, set, commit, or read-back fails, Setup Mode opens no
+  SoftAP and shows the alternating red/amber fault ring instead of advertising an ephemeral
+  passphrase that would not survive a reboot.
 - **Why 40 bits is not enough for a WPA2 passphrase (and why we use 60 bits):** WPA2-PSK uses
   PBKDF2-HMAC-SHA1 (4,096 iterations). An 8-character Crockford Base32 code (40 bits,
   `2^40 ≈ 1.1 × 10^12` candidates) can be cracked offline from a single passively captured 4-way
@@ -178,18 +187,36 @@ leaves a call running.
   before Wi-Fi starts, all three boot modes start Wi-Fi RF (`esp_wifi_start()`) **before** setting
   `rf_entropy_ready = true`, creating/loading the SoftAP passphrase (Setup AP only), or starting the
   HTTP server that mints session cookies, per-session CSRF tokens, and visual pairing patterns.
-- **Bounded request bodies and non-blocking physical erases:** Every POST endpoint enforces a small
-  per-route body limit (`128` B for pairing/reboot, `256` B for settings, `512` B for Wi-Fi,
-  `1024` B for Mind), verifies Host, mode policy, write-latch, and session/unlock **before** reading
-  the body, and enforces a hard `2 s` monotonic deadline (plus 2 s `esp_http_server` recv/send
-  timeouts) so a stalled client socket is closed instead of looping forever. `portal.lock` is never
-  held across network `recv` or `send`, and physical Enter Setup Mode, Wi-Fi reset, and full wipe
-  **never call blocking `httpd_stop()`**: they latch an atomic write-disable flag, acquire
-  `portal.lock`, permanently disable guard writes, clear RAM copies, and execute the verified
-  flash/NVS erase while holding `portal.lock`. Every NVS erase/commit return code is checked and
-  verified by read-back (`0xFF` across `iterate_kit` for wipe, decoded `!has_wifi` for Wi-Fi reset,
-  `ESP_ERR_NVS_NOT_FOUND` for `iterate_token` and `kit/volume`); any failure displays a continuous
-  alternating red/amber fault ring instead of success flashes.
+- **Bounded request bodies, non-blocking erases, and background-writer serialization:** Every POST
+  endpoint enforces a small per-route body limit (`128` B for pairing/reboot, `256` B for settings,
+  `512` B for Wi-Fi, `1024` B for Mind), verifies Host, mode policy, write-latch, and session/unlock
+  **before** reading the body, and enforces a `2 s` monotonic deadline (checked both **before and
+  after** each `httpd_req_recv`, with `recv_wait_timeout = 1 s`) so a late final chunk arriving past
+  the deadline is refused instead of reaching the handler. `portal.lock` is never held across
+  network `recv` or `send`, and physical Enter Setup Mode, Wi-Fi reset, and full wipe **never call
+  blocking `httpd_stop()`**: they latch an atomic write-disable flag, acquire `portal.lock`,
+  permanently disable guard writes, clear RAM copies, and execute the verified flash/NVS erase while
+  holding `portal.lock`. For full wipe, `iterate_kit_platform_refresh_token_disable_writes()` and a
+  static FreeRTOS mutex in `platforms/iterate_esp_idf/configuration.c` also permanently stop and
+  serialize `itx_transport`'s background `iterate-net` refresh-token writer before erasing and
+  verifying `iterate_token` in NVS, so a concurrent token refresh cannot write a rotated token back
+  before reboot. Every NVS erase/commit return code is checked and verified by read-back (`0xFF`
+  across `iterate_kit` for wipe, decoded `!has_wifi` for Wi-Fi reset, `ESP_ERR_NVS_NOT_FOUND` for
+  `iterate_token` and `kit/volume`); any failure displays a continuous alternating red/amber fault
+  ring instead of success flashes.
+- **Wi-Fi-only reset read-failure protection and single-sector power-loss limit:** If reading
+  `iterate_kit` fails during a Wi-Fi-only reset (for example a transient `esp_partition_mmap`
+  failure or a corrupt image), `iterate_kit_platform_clear_wifi_provisioning()` fails closed without
+  erasing anything and shows the fault ring so a valid mind pairing is never destroyed. Because the
+  shared `iterate_kit` partition (`partitions-16mb.csv`, offset `0x510000`, size `0x1000`) is a
+  **single 4 KiB SPI-flash erase sector**, rewriting it in place without Wi-Fi requires erasing that
+  sector before programming the mind-only image (~30–50 ms window). Power loss during that window
+  can leave `iterate_kit` erased/incomplete so the board boots into Setup Mode without the preserved
+  mind pairing (no secret is leaked, but the owner must re-enter the mind credential over the WPA2
+  SoftAP). Making Wi-Fi-only reset power-loss-atomic would require either a two-sector A/B partition
+  table change or staging a second copy of the mind credential in NVS (which would add another
+  secret copy to wipe); this prototype keeps the existing single-sector layout and states this limit
+  explicitly.
 
 ## 4. What was built, tested, and NOT proven
 
@@ -203,10 +230,11 @@ leaves a call running.
   Base32 setup-code generation (`xxxx-xxxx-xxxx`), 128-bit session/CSRF token formatting, `WIFI:` QR
   escaping, Host-header DNS-rebinding filter, per-client session isolation, per-session CSRF
   verification, two-tap visual claim pairing (proving an unconfirmed claim grants **zero** write
-  access, another browser cannot see or hijack a pending claim, Mute OFF / cancel / 30 s expiry all
-  revoke cleanly, Tap 2 confirms only the claiming browser for 3 min with no extension on POST,
-  eviction protection preserves pending and unlocked sessions), and `writes_disabled` write-lock
-  refusal (`provisioning_state_test.c`).
+  access, a claim never shown on the ring or shown for `< 2 s` or with a stale `claim_id` cannot be
+  confirmed, another browser cannot see or hijack a pending claim, Mute OFF / cancel / 30 s expiry
+  all revoke cleanly, Tap 2 confirms only the displayed claim's browser for 3 min with no extension
+  on POST, eviction protection preserves pending and unlocked sessions), and `writes_disabled`
+  write-lock refusal (`provisioning_state_test.c`).
 - RFC 1035 captive DNS responder for A/ANY, AAAA NODATA, and malformed packets (`captive_dns_test.c`).
 - Cookie header parsing (`iterate_kit_web_cookie_get`), mode action policy (`WIFI`, `MIND`, and
   `REBOOT` allowed only in `SETUP_AP`; only `SETTINGS` allowed on LAN), captive-probe detection,
@@ -235,16 +263,18 @@ Setup Mode`, evaluates `havpe_portal_consume_setup_ap_request()` cleanly on `ESP
 - `iterate-kit-havpe.bin` builds cleanly under ESP-IDF 6.1 and passes
   `scripts/firmware-release.ts build` (partition table layout check, `iterate_kit` non-overlap
   check, and `filesOutsideInputs` check).
-- `platforms/iterate_esp_idf/configuration.c`: flash read/write/clear-Wi-Fi/full-wipe with NVS
-  error checks and read-back verification (`verify_partition_erased`,
-  `iterate_kit_platform_refresh_token_clear`, `clear_and_verify_nvs_volume`), and NVS setup-code
-  persistence.
+- `platforms/iterate_esp_idf/configuration.c` and `itx_transport.c`: flash read/write/clear-Wi-Fi
+  (fail-closed on read errors) / full-wipe with NVS error checks, FreeRTOS mutex + permanent latch
+  blocking `itx_transport` rotated-token writes during/after wipe, read-back verification
+  (`verify_partition_erased`, `iterate_kit_platform_refresh_token_clear`,
+  `clear_and_verify_nvs_volume`), and NVS setup-code commit + read-back verification before use.
 - `platforms/iterate_esp_idf/components/board/led_ring.c` and `board.c`: custom ring pixel overlay
   and current-volume getter.
 - `devices/havpe/havpe_portal.c`, `havpe_device.c`, `havpe_ui.c`: RF-first HWRNG gating in all
-  three modes, SoftAP-only passphrase loading, one-boot RTC `setup_once_rtc` flag triggered by the
-  physical Enter Setup Mode gesture, SoftAP (`WIFI_MODE_APSTA`), 2.4 GHz scan, UDP/53 captive DNS
-  task, `esp_http_server` with 2 s recv/send timeouts, hard 2 s body deadline, per-route body caps,
+  three modes, SoftAP-only verified-NVS passphrase loading (fault ring and no SoftAP on radio or
+  NVS error), one-boot RTC `setup_once_rtc` flag triggered by the physical Enter Setup Mode gesture,
+  SoftAP (`WIFI_MODE_APSTA`), 2.4 GHz scan, UDP/53 captive DNS task, `esp_http_server` with 1 s recv
+  / 2 s send timeouts, 2 s body deadline checked before and after each receive, per-route body caps,
   pre-body session/unlock checks, per-client `kit_sid` `HttpOnly; SameSite=Strict` cookies, HTTP 403
   refusal of `/wifi`, `/mind`, `/reboot` on LAN, non-blocking write-latched physical erase with
   red/amber failure ring, `espressif/mdns` advertisement (`_http._tcp` + `_iterate._tcp`), and

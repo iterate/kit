@@ -270,6 +270,9 @@ void iterate_kit_portal_guard_cancel_claim(struct iterate_kit_portal_guard *guar
   if (guard == NULL) return;
   guard->claim_state = ITERATE_KIT_CLAIM_NONE;
   guard->claim_expires_at_ms = 0U;
+  guard->pending_claim_id = 0U;
+  guard->pending_pattern_shown = false;
+  guard->pending_pattern_first_shown_ms = 0U;
   memset(guard->pending_session_token, 0, sizeof(guard->pending_session_token));
   memset(&guard->pending_pattern, 0, sizeof(guard->pending_pattern));
 }
@@ -483,6 +486,10 @@ enum iterate_kit_portal_auth_result iterate_kit_portal_guard_request_claim(
       (enum iterate_kit_claim_color)(pattern_entropy_byte & 0x03U);
   guard->pending_pattern.position =
       (enum iterate_kit_claim_position)((pattern_entropy_byte >> 2U) & 0x03U);
+  if (++guard->next_claim_id == 0U) guard->next_claim_id = 1U;
+  guard->pending_claim_id = guard->next_claim_id;
+  guard->pending_pattern_shown = false;
+  guard->pending_pattern_first_shown_ms = 0U;
   guard->claim_state = ITERATE_KIT_CLAIM_PENDING_CONFIRM;
   guard->claim_expires_at_ms = now_ms + (uint64_t)ITERATE_KIT_PORTAL_CLAIM_TTL_MS;
   memcpy(
@@ -493,11 +500,36 @@ enum iterate_kit_portal_auth_result iterate_kit_portal_guard_request_claim(
   return ITERATE_KIT_PORTAL_AUTH_OK;
 }
 
-bool iterate_kit_portal_guard_confirm_claim(
-    struct iterate_kit_portal_guard *guard, uint64_t now_ms) {
-  if (guard == NULL || guard->writes_disabled) return false;
+void iterate_kit_portal_guard_note_pattern_shown(
+    struct iterate_kit_portal_guard *guard,
+    uint32_t claim_id,
+    uint64_t now_ms) {
+  if (guard == NULL || claim_id == 0U) return;
   expire_state(guard, now_ms);
-  if (guard->claim_state != ITERATE_KIT_CLAIM_PENDING_CONFIRM) return false;
+  if (guard->claim_state != ITERATE_KIT_CLAIM_PENDING_CONFIRM ||
+      guard->pending_claim_id != claim_id) {
+    return;
+  }
+  if (!guard->pending_pattern_shown) {
+    guard->pending_pattern_shown = true;
+    guard->pending_pattern_first_shown_ms = now_ms;
+  }
+}
+
+bool iterate_kit_portal_guard_confirm_claim(
+    struct iterate_kit_portal_guard *guard,
+    uint32_t shown_claim_id,
+    uint64_t now_ms) {
+  if (guard == NULL || guard->writes_disabled || shown_claim_id == 0U) return false;
+  expire_state(guard, now_ms);
+  if (guard->claim_state != ITERATE_KIT_CLAIM_PENDING_CONFIRM ||
+      guard->pending_claim_id != shown_claim_id ||
+      !guard->pending_pattern_shown ||
+      now_ms < guard->pending_pattern_first_shown_ms ||
+      now_ms - guard->pending_pattern_first_shown_ms <
+          (uint64_t)ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS) {
+    return false;
+  }
 
   struct iterate_kit_portal_session *slot =
       find_session_mut(guard, guard->pending_session_token);
@@ -552,11 +584,14 @@ uint32_t iterate_kit_portal_guard_claim_remaining_s(
 bool iterate_kit_portal_guard_active_claim_pattern(
     const struct iterate_kit_portal_guard *guard,
     uint64_t now_ms,
+    uint32_t *out_claim_id,
     struct iterate_kit_claim_pattern *out_pattern) {
+  if (out_claim_id != NULL) *out_claim_id = 0U;
   if (iterate_kit_portal_guard_claim_state(guard, now_ms) !=
       ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
     return false;
   }
+  if (out_claim_id != NULL) *out_claim_id = guard->pending_claim_id;
   if (out_pattern != NULL) *out_pattern = guard->pending_pattern;
   return true;
 }

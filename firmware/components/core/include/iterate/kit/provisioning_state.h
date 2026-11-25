@@ -28,6 +28,9 @@ enum {
   ITERATE_KIT_WIFI_QR_CAPACITY = 160,
   ITERATE_KIT_PORTAL_UNLOCK_MS = 180000,
   ITERATE_KIT_PORTAL_CLAIM_TTL_MS = 30000,
+  /* Minimum time a claim's pattern must be displayed on the LED ring before
+   * physical Tap 2 can confirm it (prevents confirming an unseen last-moment claim). */
+  ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS = 2000,
 };
 
 /**
@@ -123,6 +126,10 @@ struct iterate_kit_portal_guard {
   bool writes_disabled;
   enum iterate_kit_claim_state claim_state;
   uint64_t claim_expires_at_ms;
+  uint32_t next_claim_id;
+  uint32_t pending_claim_id;
+  bool pending_pattern_shown;
+  uint64_t pending_pattern_first_shown_ms;
   char pending_session_token[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   struct iterate_kit_claim_pattern pending_pattern;
   struct iterate_kit_portal_session sessions[ITERATE_KIT_PORTAL_MAX_SESSIONS];
@@ -262,12 +269,26 @@ enum iterate_kit_portal_auth_result iterate_kit_portal_guard_request_claim(
     struct iterate_kit_claim_pattern *out_pattern);
 
 /**
+ * Record that the LED ring has actually rendered and presented `claim_id`'s
+ * pattern at `now_ms`. Confirmation requires this to have happened at least
+ * `ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS` (2 s) before Tap 2.
+ */
+void iterate_kit_portal_guard_note_pattern_shown(
+    struct iterate_kit_portal_guard *guard,
+    uint32_t claim_id,
+    uint64_t now_ms);
+
+/**
  * Tap 2 (Mute ON + short tap while PENDING_CONFIRM): promote ONLY the browser
- * whose visual pattern is currently displayed on the ring to a 3-minute
- * unlocked session, and clear the pending claim. Returns true if confirmed.
+ * whose `shown_claim_id` matches the active pending claim AND whose pattern
+ * has been shown on the LED ring for at least `ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS`
+ * (2 s). Refuses any claim that arrived after the last ring render or was
+ * shown for less than 2 s. Returns true if confirmed.
  */
 bool iterate_kit_portal_guard_confirm_claim(
-    struct iterate_kit_portal_guard *guard, uint64_t now_ms);
+    struct iterate_kit_portal_guard *guard,
+    uint32_t shown_claim_id,
+    uint64_t now_ms);
 
 /** Cancel any OPEN or PENDING_CONFIRM claim (called on Mute OFF, holds, etc.). */
 void iterate_kit_portal_guard_cancel_claim(struct iterate_kit_portal_guard *guard);
@@ -286,12 +307,14 @@ uint32_t iterate_kit_portal_guard_claim_remaining_s(
     const struct iterate_kit_portal_guard *guard, uint64_t now_ms);
 
 /**
- * Returns true and fills `out_pattern` when a claim is actively waiting for
- * physical confirmation on the LED ring (`PENDING_CONFIRM` and not expired).
+ * Returns true and fills `out_claim_id` / `out_pattern` when a claim is
+ * actively waiting for physical confirmation on the LED ring (`PENDING_CONFIRM`
+ * and not expired).
  */
 bool iterate_kit_portal_guard_active_claim_pattern(
     const struct iterate_kit_portal_guard *guard,
     uint64_t now_ms,
+    uint32_t *out_claim_id,
     struct iterate_kit_claim_pattern *out_pattern);
 
 /**

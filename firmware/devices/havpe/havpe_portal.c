@@ -106,6 +106,7 @@ static struct {
   bool mdns_started;
   httpd_handle_t server;
   struct havpe_reset_gesture gesture;
+  uint32_t last_shown_claim_id;
   uint64_t last_net_poll_ms;
 } portal;
 
@@ -214,21 +215,23 @@ static void init_identity_base(
  * pairing pattern require `portal.rf_entropy_ready == true`, which is set ONLY
  * after `esp_wifi_start()` succeeds in each boot mode.
  */
-static void init_setup_ap_passphrase_with_rf_active(void) {
+static bool init_setup_ap_passphrase_with_rf_active(void) {
   char qr[ITERATE_KIT_WIFI_QR_CAPACITY];
   if (!portal.rf_entropy_ready) {
     ESP_LOGE(tag, "refusing to initialize setup code before Wi-Fi RF HWRNG is active");
-    return;
+    return false;
   }
   if (!iterate_kit_platform_setup_code_load_or_create(portal.setup_code)) {
-    ESP_LOGE(tag, "failed to load/create setup code");
-    return;
+    memset(portal.setup_code, 0, sizeof(portal.setup_code));
+    ESP_LOGE(tag, "failed to persist and verify setup code in NVS");
+    return false;
   }
   if (iterate_kit_wifi_qr_format(portal.hostname, portal.setup_code, qr, sizeof(qr))) {
     ESP_LOGI(tag, "setup_ap ssid=%s setup_code=%s", portal.hostname, portal.setup_code);
     ESP_LOGI(tag, "setup_qr %s", qr);
   }
   memset(qr, 0, sizeof(qr));
+  return true;
 }
 
 static bool fill_session_entropy_locked(
@@ -319,8 +322,11 @@ static void execute_wifi_reset(void) {
 }
 
 static void execute_full_wipe(void) {
-  ESP_LOGW(tag, "full wipe triggered — latching writes off, clearing RAM, flash, NVS token and volume");
+  ESP_LOGW(tag, "full wipe triggered — latching portal & token writers off, clearing RAM, flash, NVS token and volume");
   __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
+  /* Permanently latch refresh-token NVS writes off before erasing so
+   * `itx_transport` on `iterate-net` cannot commit a rotated token back. */
+  iterate_kit_platform_refresh_token_disable_writes();
   if (portal.lock != NULL) (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
   iterate_kit_portal_guard_disable_writes(&portal.guard);
   portal.reboot_pending = false;
@@ -489,6 +495,13 @@ static esp_err_t read_post_body(
       if (received == HTTPD_SOCK_ERR_TIMEOUT && monotonic_ms() < deadline_ms) {
         continue;
       }
+      memset(buf, 0, max_body_bytes + 1U);
+      return ESP_FAIL;
+    }
+    /* Also check deadline AFTER every receive so a final chunk arriving past
+     * the deadline is refused instead of slipping into the handler. */
+    if (__atomic_load_n(&portal_writes_latched, __ATOMIC_SEQ_CST) ||
+        monotonic_ms() >= deadline_ms) {
       memset(buf, 0, max_body_bytes + 1U);
       return ESP_FAIL;
     }
@@ -1028,7 +1041,7 @@ static bool start_http_server(void) {
   config.core_id = 0;
   config.max_open_sockets = 4;
   config.lru_purge_enable = true;
-  config.recv_wait_timeout = 2;
+  config.recv_wait_timeout = 1;
   config.send_wait_timeout = 2;
   config.max_uri_handlers = 10;
 
@@ -1148,19 +1161,25 @@ static void handle_gesture_and_claim_cancel(
       execute_enter_setup();
     }
   } else if (event == HAVPE_GESTURE_PAIR_TAP && portal.mode != ITERATE_KIT_BOOT_MODE_SETUP_AP) {
+    enum iterate_kit_claim_state prev_state = ITERATE_KIT_CLAIM_NONE;
     bool confirmed = false;
     if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(200)) == pdTRUE) {
-      if (iterate_kit_portal_guard_claim_state(&portal.guard, now_ms) ==
-          ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
-        confirmed = iterate_kit_portal_guard_confirm_claim(&portal.guard, now_ms);
+      prev_state = iterate_kit_portal_guard_claim_state(&portal.guard, now_ms);
+      if (prev_state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+        confirmed = iterate_kit_portal_guard_confirm_claim(
+            &portal.guard, portal.last_shown_claim_id, now_ms);
       } else {
+        portal.last_shown_claim_id = 0U;
         iterate_kit_portal_guard_open_claim(&portal.guard, now_ms);
       }
       xSemaphoreGive(portal.lock);
     }
     if (confirmed) {
+      portal.last_shown_claim_id = 0U;
       havpe_reset_gesture_trigger_unlock_flash(&portal.gesture, now_ms);
       ESP_LOGI(tag, "LAN browser visual pairing confirmed for 180 s");
+    } else if (prev_state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+      ESP_LOGI(tag, "ignoring tap: claim pattern must be shown on ring for at least 2 s");
     } else {
       ESP_LOGI(tag, "LAN browser pairing window opened for 30 s");
     }
@@ -1170,6 +1189,7 @@ static void handle_gesture_and_claim_cancel(
   /* "Anything else cancels": sliding Mute OFF or entering any hold cancels any claim. */
   if (portal.mode != ITERATE_KIT_BOOT_MODE_SETUP_AP &&
       (!muted || (vis != HAVPE_VISUAL_NONE && vis != HAVPE_VISUAL_UNLOCK_FLASH))) {
+    portal.last_shown_claim_id = 0U;
     if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
       if (portal.guard.claim_state != ITERATE_KIT_CLAIM_NONE) {
         iterate_kit_portal_guard_cancel_claim(&portal.guard);
@@ -1183,18 +1203,23 @@ static void handle_gesture_and_claim_cancel(
 static bool render_claim_ring_overlay(
     uint64_t now_ms, struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]) {
   enum iterate_kit_claim_state state = ITERATE_KIT_CLAIM_NONE;
+  uint32_t claim_id = 0U;
   struct iterate_kit_claim_pattern pattern = {0};
   if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
     state = iterate_kit_portal_guard_claim_state(&portal.guard, now_ms);
-    if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
-      (void)iterate_kit_portal_guard_active_claim_pattern(&portal.guard, now_ms, &pattern);
+    if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM &&
+        iterate_kit_portal_guard_active_claim_pattern(
+            &portal.guard, now_ms, &claim_id, &pattern)) {
+      iterate_kit_portal_guard_note_pattern_shown(&portal.guard, claim_id, now_ms);
     }
     xSemaphoreGive(portal.lock);
   }
-  if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+  if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM && claim_id != 0U) {
+    portal.last_shown_claim_id = claim_id;
     havpe_ring_render_claim_pattern(pattern.color, pattern.position, (uint32_t)now_ms, pixels);
     return true;
   }
+  portal.last_shown_claim_id = 0U;
   if (state == ITERATE_KIT_CLAIM_OPEN) {
     havpe_ring_render_claim_open((uint32_t)now_ms, pixels);
     return true;
@@ -1254,11 +1279,11 @@ void havpe_portal_run_setup_ap(
   }
   if (wifi_err == ESP_OK) {
     portal.rf_entropy_ready = true;
-    init_setup_ap_passphrase_with_rf_active();
+    const bool code_ok = init_setup_ap_passphrase_with_rf_active();
     portal.rf_entropy_ready = false;
     (void)esp_wifi_stop();
 
-    if (!iterate_kit_setup_code_valid(portal.setup_code)) {
+    if (!code_ok || !iterate_kit_setup_code_valid(portal.setup_code)) {
       wifi_err = ESP_FAIL;
     } else {
       wifi_config_t ap_cfg = {0};
@@ -1288,7 +1313,7 @@ void havpe_portal_run_setup_ap(
     radio_fault = true;
     ESP_LOGE(
         tag,
-        "Wi-Fi radio failed to start (%s) — Setup Mode unavailable; showing fault ring",
+        "Setup Mode unavailable (Wi-Fi radio or NVS setup code failed: %s) — showing fault ring",
         esp_err_to_name(wifi_err));
   }
 
@@ -1386,8 +1411,10 @@ void havpe_portal_run_lan_unlinked(
     }
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     if (vis != HAVPE_VISUAL_NONE) {
+      portal.last_shown_claim_id = 0U;
       havpe_ring_render_gesture(vis, progress, (uint32_t)now, pixels);
     } else if (radio_fault) {
+      portal.last_shown_claim_id = 0U;
       havpe_ring_render_erase_error((uint32_t)now, pixels);
     } else if (!render_claim_ring_overlay(now, pixels)) {
       havpe_ring_render_lan_unlinked(connected, (uint32_t)now, pixels);
@@ -1426,6 +1453,7 @@ void havpe_portal_poll_normal(
 
   struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
   if (vis != HAVPE_VISUAL_NONE) {
+    portal.last_shown_claim_id = 0U;
     havpe_ring_render_gesture(vis, progress, (uint32_t)now_ms, pixels);
     iterate_kit_led_ring_show_pixels(pixels, 120U);
   } else if (render_claim_ring_overlay(now_ms, pixels)) {

@@ -86,6 +86,8 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
   char rot_sid[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   char rot_sid_b[ITERATE_KIT_SESSION_TOKEN_CAPACITY];
   struct iterate_kit_claim_pattern pat_a, pat_ring, pat_check;
+  uint32_t claim_id = 0U;
+  uint32_t old_claim_id = 0U;
   bool created = false;
 
   fill_seq(s1, 0x10U);
@@ -131,7 +133,7 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
   assert(iterate_kit_portal_guard_request_claim(
              &guard, sid_a, csrf_a, 0x07U, rs1, rc1, 1000U, rot_sid, &pat_a) ==
          ITERATE_KIT_PORTAL_AUTH_NO_CLAIM);
-  assert(!iterate_kit_portal_guard_active_claim_pattern(&guard, 1000U, &pat_ring));
+  assert(!iterate_kit_portal_guard_active_claim_pattern(&guard, 1000U, &claim_id, &pat_ring));
 
   /* Tap 1 opens a 30 s window; still no write access for anyone. */
   iterate_kit_portal_guard_open_claim(&guard, 2000U);
@@ -153,10 +155,14 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
   assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 3100U));
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_b, csrf_b, 3100U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
-  /* Ring shows B's pattern; owner (Client A) sees CLAIM_BUSY and NEVER sees B's pattern. */
-  assert(iterate_kit_portal_guard_active_claim_pattern(&guard, 3100U, &pat_ring));
+  /* Ring sees B's claim_id + pattern; owner (Client A) sees CLAIM_BUSY and NEVER sees B's pattern. */
+  assert(iterate_kit_portal_guard_active_claim_pattern(&guard, 3100U, &claim_id, &pat_ring));
+  assert(claim_id != 0U);
   assert(pat_ring.color == ITERATE_KIT_CLAIM_COLOR_AMBER &&
          pat_ring.position == ITERATE_KIT_CLAIM_POS_RIGHT);
+  /* Even with the right claim_id, Tap 2 CANNOT confirm a claim that the ring never showed! */
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 6000U));
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, 0U, 6000U));
   assert(iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_b, 3100U, &pat_check));
   assert(!iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_a, 3100U, &pat_check));
   assert(iterate_kit_portal_guard_request_claim(
@@ -164,9 +170,11 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
          ITERATE_KIT_PORTAL_AUTH_CLAIM_BUSY);
 
   /* Owner sees mismatched ring and flips Mute OFF -> cancels attacker's claim cleanly. */
+  iterate_kit_portal_guard_note_pattern_shown(&guard, claim_id, 3250U);
+  old_claim_id = claim_id;
   iterate_kit_portal_guard_cancel_claim(&guard);
   assert(iterate_kit_portal_guard_claim_state(&guard, 3300U) == ITERATE_KIT_CLAIM_NONE);
-  assert(!iterate_kit_portal_guard_confirm_claim(&guard, 3300U));
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, old_claim_id, 6000U));
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_b, csrf_b, 3300U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
@@ -175,11 +183,14 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
   assert(iterate_kit_portal_guard_request_claim(
              &guard, sid_a, csrf_a, 0x0dU /* GREEN + LEFT */, rs1, rc1, 11000U,
              rot_sid, &pat_a) == ITERATE_KIT_PORTAL_AUTH_OK);
+  assert(iterate_kit_portal_guard_active_claim_pattern(&guard, 11050U, &claim_id, &pat_ring));
+  assert(claim_id != old_claim_id);
+  iterate_kit_portal_guard_note_pattern_shown(&guard, claim_id, 11050U);
   assert(iterate_kit_portal_guard_ensure_session(
       &guard, rot_sid, s1, c1, 11100U, sid_a, csrf_a, &created) && !created);
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 40999U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
-  assert(!iterate_kit_portal_guard_confirm_claim(&guard, 41000U));
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 41000U));
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 41000U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
@@ -199,7 +210,7 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
          ITERATE_KIT_PORTAL_AUTH_OK);
   assert(iterate_kit_portal_guard_claim_state(&guard, 51200U) == ITERATE_KIT_CLAIM_NONE);
 
-  /* Full 2-tap visual pairing: Tap 1 -> Client A requests -> ring shows pattern ->
+  /* Full 2-tap visual pairing: Tap 1 -> Client A requests -> ring shows pattern for >= 2 s ->
    * Tap 2 confirms -> ONLY Client A gets 3-min write access (never extended on POST). */
   iterate_kit_portal_guard_open_claim(&guard, 60000U);
   assert(iterate_kit_portal_guard_request_claim(
@@ -209,6 +220,8 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
          pat_a.position == ITERATE_KIT_CLAIM_POS_RIGHT);
   assert(iterate_kit_portal_guard_ensure_session(
       &guard, rot_sid, s1, c1, 61100U, sid_a, csrf_a, &created) && !created);
+  assert(iterate_kit_portal_guard_active_claim_pattern(&guard, 61150U, &claim_id, &pat_ring));
+  assert(claim_id != old_claim_id);
   /* Unauthenticated GET spam cannot evict the pending-claim session before Tap 2. */
   for (uint8_t i = 0U; i < 8U; ++i) {
     uint8_t sp_s[16], sp_c[16];
@@ -220,23 +233,27 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
         &guard, "", sp_s, sp_c, 61200U + i, sp_sid, sp_csrf, &created) && created);
   }
   assert(iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_a, 62000U, &pat_check));
-  /* Still locked before Tap 2. */
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 62000U) ==
+  /* Cannot confirm before ring displays pattern, nor with a stale claim_id, nor before 2 s! */
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 62000U));
+  iterate_kit_portal_guard_note_pattern_shown(&guard, claim_id, 62000U);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, old_claim_id, 65000U));
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 63999U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 63999U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
-  /* Tap 2 confirms! */
-  assert(iterate_kit_portal_guard_confirm_claim(&guard, 63000U));
-  assert(iterate_kit_portal_guard_claim_state(&guard, 63000U) == ITERATE_KIT_CLAIM_NONE);
-  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 63000U));
-  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_a, 63000U) == 180U);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 63000U) ==
+  /* At >= 2000 ms after first shown on the ring, Tap 2 confirms! */
+  assert(iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 64000U));
+  assert(iterate_kit_portal_guard_claim_state(&guard, 64000U) == ITERATE_KIT_CLAIM_NONE);
+  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 64000U));
+  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_a, 64000U) == 180U);
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 64000U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
   /* Other browser is still locked. */
-  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 63000U));
+  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 64000U));
   /* Ordinary POSTs do not extend the 180 s deadline. */
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 242999U) ==
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 243999U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 243000U) ==
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 244000U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
   /* Disabling writes cancels any active claim and rejects all POSTs & claims. */
