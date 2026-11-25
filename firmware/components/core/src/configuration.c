@@ -66,6 +66,18 @@ static uint16_t read_u16_le(const uint8_t *bytes) {
       ((uint16_t)bytes[1] << 8U));
 }
 
+static void write_u32_le(uint8_t *bytes, uint32_t value) {
+  bytes[0] = (uint8_t)(value & 0xffU);
+  bytes[1] = (uint8_t)((value >> 8U) & 0xffU);
+  bytes[2] = (uint8_t)((value >> 16U) & 0xffU);
+  bytes[3] = (uint8_t)((value >> 24U) & 0xffU);
+}
+
+static void write_u16_le(uint8_t *bytes, uint16_t value) {
+  bytes[0] = (uint8_t)(value & 0xffU);
+  bytes[1] = (uint8_t)((value >> 8U) & 0xffU);
+}
+
 static uint32_t configuration_crc32(
     const uint8_t *bytes, size_t length) {
   /*
@@ -265,27 +277,35 @@ iterate_kit_configuration_build_itx_websocket_url(
   return build_websocket_url(os_base_url, "/api", destination, destination_capacity);
 }
 
-enum iterate_kit_configuration_error iterate_kit_configuration_decode(
+static enum iterate_kit_configuration_error decode_internal(
     struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence,
     const uint8_t *image,
-    size_t image_size) {
+    size_t image_size,
+    bool require_complete) {
   uint32_t expected_crc;
   uint32_t payload_size_u32;
   const uint8_t *payload;
   size_t payload_size;
   size_t offset = 0U;
   uint32_t seen_fields = 0U;
-  const uint32_t required_fields =
+  const uint32_t wifi_fields =
       (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_SSID) |
-      (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_PASSWORD) |
-      (UINT32_C(1) << CONFIGURATION_FIELD_OS_BASE_URL);
+      (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_PASSWORD);
   const uint32_t project_fields =
       (UINT32_C(1) << CONFIGURATION_FIELD_PROJECT_ID) |
       (UINT32_C(1) << CONFIGURATION_FIELD_PROJECT_API_KEY);
   const uint32_t mind_fields =
       (UINT32_C(1) << CONFIGURATION_FIELD_OAUTH_CLIENT_ID) |
       (UINT32_C(1) << CONFIGURATION_FIELD_OAUTH_REFRESH_TOKEN);
+  const uint32_t any_platform_fields =
+      (UINT32_C(1) << CONFIGURATION_FIELD_OS_BASE_URL) |
+      project_fields |
+      mind_fields;
 
+  if (presence != NULL) {
+    memset(presence, 0, sizeof(*presence));
+  }
   if (configuration == NULL || image == NULL) {
     return fail(
         configuration,
@@ -416,37 +436,350 @@ enum iterate_kit_configuration_error iterate_kit_configuration_decode(
     }
   }
 
-  if ((seen_fields & required_fields) != required_fields) {
-    return fail(
-        configuration,
-        ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+  const bool has_ssid =
+      (seen_fields & (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_SSID)) != 0U;
+  const bool has_wifi_all = (seen_fields & wifi_fields) == wifi_fields;
+  if (require_complete) {
+    if (!has_wifi_all ||
+        (seen_fields & (UINT32_C(1) << CONFIGURATION_FIELD_OS_BASE_URL)) == 0U) {
+      return fail(configuration, ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+    }
+  } else {
+    if (!has_ssid &&
+        (seen_fields & (UINT32_C(1) << CONFIGURATION_FIELD_WIFI_PASSWORD)) != 0U &&
+        configuration->wifi_password[0] != '\0') {
+      return fail(configuration, ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+    }
   }
+
   /*
    * ONE PLATFORM, WHOLE. A half set is a missing field; both sets would leave
    * the board to guess which credential the image meant, so that is refused.
    */
-  if ((seen_fields & project_fields) != 0U &&
-      (seen_fields & mind_fields) != 0U) {
-    return fail(
-        configuration,
-        ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+  const bool any_platform = (seen_fields & any_platform_fields) != 0U;
+  if (any_platform || require_complete) {
+    if ((seen_fields & (UINT32_C(1) << CONFIGURATION_FIELD_OS_BASE_URL)) == 0U) {
+      return fail(configuration, ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+    }
+    if ((seen_fields & project_fields) != 0U &&
+        (seen_fields & mind_fields) != 0U) {
+      return fail(
+          configuration,
+          ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+    }
+    if ((seen_fields & mind_fields) == mind_fields) {
+      configuration->platform = ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
+    } else if ((seen_fields & project_fields) == project_fields) {
+      configuration->platform = ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT;
+    } else {
+      return fail(
+          configuration,
+          ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
+    }
+    if (!valid_base_url(configuration->os_base_url) ||
+        (configuration->platform ==
+             ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT &&
+         !valid_project_id(configuration->project_id))) {
+      return fail(
+          configuration,
+          ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+    }
   }
-  if ((seen_fields & mind_fields) == mind_fields) {
-    configuration->platform = ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
-  } else if ((seen_fields & project_fields) == project_fields) {
-    configuration->platform = ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT;
-  } else {
-    return fail(
-        configuration,
-        ITERATE_KIT_CONFIGURATION_MISSING_FIELD);
-  }
-  if (!valid_base_url(configuration->os_base_url) ||
-      (configuration->platform ==
-           ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT &&
-       !valid_project_id(configuration->project_id))) {
-    return fail(
-        configuration,
-        ITERATE_KIT_CONFIGURATION_INVALID_VALUE);
+
+  if (presence != NULL) {
+    presence->has_wifi = has_ssid;
+    presence->has_platform = any_platform;
+    presence->has_status_voice =
+        (seen_fields & (UINT32_C(1) << CONFIGURATION_FIELD_STATUS_VOICE)) != 0U;
   }
   return ITERATE_KIT_CONFIGURATION_OK;
+}
+
+enum iterate_kit_configuration_error iterate_kit_configuration_decode(
+    struct iterate_kit_configuration *configuration,
+    const uint8_t *image,
+    size_t image_size) {
+  return decode_internal(configuration, NULL, image, image_size, true);
+}
+
+enum iterate_kit_configuration_error iterate_kit_configuration_decode_stored(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence,
+    const uint8_t *image,
+    size_t image_size) {
+  if (presence == NULL) {
+    return fail(configuration, ITERATE_KIT_CONFIGURATION_INVALID_ARGUMENT);
+  }
+  return decode_internal(configuration, presence, image, image_size, false);
+}
+
+bool iterate_kit_configuration_valid_wifi_password(const char *password) {
+  size_t length;
+  if (password == NULL) return false;
+  length = strlen(password);
+  if (length == 0U || (length >= 8U && length <= 63U)) return true;
+  if (length != 64U) return false;
+  for (size_t index = 0U; index < length; ++index) {
+    const char c = password[index];
+    const bool hex =
+        (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if (!hex) return false;
+  }
+  return true;
+}
+
+bool iterate_kit_configuration_parse_status_voice(
+    const char *name, enum iterate_kit_status_voice *voice) {
+  if (name == NULL || voice == NULL) return false;
+  for (size_t index = 0U;
+       index < sizeof(status_voice_names) / sizeof(status_voice_names[0]);
+       ++index) {
+    if (strcmp(status_voice_names[index], name) == 0) {
+      *voice = (enum iterate_kit_status_voice)index;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool valid_oauth_client_id(const char *value) {
+  if (value == NULL) return false;
+  if (strncmp(value, "https://", 8U) != 0 && strncmp(value, "http://", 7U) != 0) {
+    return false;
+  }
+  const size_t length = strlen(value);
+  if (length <= 8U) return false;
+  for (size_t index = 0U; index < length; ++index) {
+    const unsigned char c = (unsigned char)value[index];
+    if (c <= 0x20U || c >= 0x7fU) return false;
+  }
+  return true;
+}
+
+static enum iterate_kit_configuration_error append_tlv(
+    uint8_t *payload,
+    size_t payload_capacity,
+    size_t *offset,
+    uint8_t tag,
+    const char *value,
+    size_t max_bytes,
+    bool allow_empty) {
+  const size_t length = strlen(value);
+  if (!allow_empty && length == 0U) {
+    return ITERATE_KIT_CONFIGURATION_MISSING_FIELD;
+  }
+  if (length > max_bytes) {
+    return ITERATE_KIT_CONFIGURATION_FIELD_TOO_LONG;
+  }
+  if (CONFIGURATION_FIELD_HEADER_SIZE + length > payload_capacity - *offset) {
+    return ITERATE_KIT_CONFIGURATION_FIELD_TOO_LONG;
+  }
+  payload[*offset] = tag;
+  write_u16_le(payload + *offset + 1U, (uint16_t)length);
+  if (length > 0U) {
+    memcpy(payload + *offset + CONFIGURATION_FIELD_HEADER_SIZE, value, length);
+  }
+  *offset += CONFIGURATION_FIELD_HEADER_SIZE + length;
+  return ITERATE_KIT_CONFIGURATION_OK;
+}
+
+enum iterate_kit_configuration_error iterate_kit_configuration_encode(
+    const struct iterate_kit_configuration *configuration,
+    const struct iterate_kit_configuration_presence *presence,
+    uint8_t *image,
+    size_t capacity,
+    size_t *written_size) {
+  uint8_t *payload;
+  size_t payload_capacity;
+  size_t payload_offset = 0U;
+  enum iterate_kit_configuration_error error;
+
+  if (written_size != NULL) *written_size = 0U;
+  if (configuration == NULL || presence == NULL || image == NULL ||
+      capacity <= ITERATE_KIT_CONFIGURATION_HEADER_SIZE) {
+    return ITERATE_KIT_CONFIGURATION_INVALID_ARGUMENT;
+  }
+
+  payload = image + ITERATE_KIT_CONFIGURATION_HEADER_SIZE;
+  payload_capacity = capacity - ITERATE_KIT_CONFIGURATION_HEADER_SIZE;
+
+  if (presence->has_wifi) {
+    if (!iterate_kit_configuration_valid_wifi_password(configuration->wifi_password)) {
+      return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+    }
+    error = append_tlv(
+        payload, payload_capacity, &payload_offset,
+        CONFIGURATION_FIELD_WIFI_SSID, configuration->wifi_ssid,
+        ITERATE_KIT_WIFI_SSID_CAPACITY - 1U, false);
+    if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+    error = append_tlv(
+        payload, payload_capacity, &payload_offset,
+        CONFIGURATION_FIELD_WIFI_PASSWORD, configuration->wifi_password,
+        ITERATE_KIT_WIFI_PASSWORD_CAPACITY - 1U, true);
+    if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+  }
+
+  if (presence->has_platform) {
+    if (!valid_base_url(configuration->os_base_url)) {
+      return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+    }
+    error = append_tlv(
+        payload, payload_capacity, &payload_offset,
+        CONFIGURATION_FIELD_OS_BASE_URL, configuration->os_base_url,
+        ITERATE_KIT_OS_BASE_URL_CAPACITY - 1U, false);
+    if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+
+    if (configuration->platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND) {
+      if (!valid_oauth_client_id(configuration->oauth_client_id)) {
+        return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+      }
+      error = append_tlv(
+          payload, payload_capacity, &payload_offset,
+          CONFIGURATION_FIELD_OAUTH_CLIENT_ID, configuration->oauth_client_id,
+          ITERATE_KIT_OAUTH_CLIENT_ID_CAPACITY - 1U, false);
+      if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+      error = append_tlv(
+          payload, payload_capacity, &payload_offset,
+          CONFIGURATION_FIELD_OAUTH_REFRESH_TOKEN, configuration->oauth_refresh_token,
+          ITERATE_KIT_OAUTH_TOKEN_CAPACITY - 1U, false);
+      if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+    } else if (configuration->platform == ITERATE_KIT_CONFIGURATION_PLATFORM_PROJECT) {
+      if (!valid_project_id(configuration->project_id)) {
+        return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+      }
+      error = append_tlv(
+          payload, payload_capacity, &payload_offset,
+          CONFIGURATION_FIELD_PROJECT_ID, configuration->project_id,
+          ITERATE_KIT_PROJECT_ID_CAPACITY - 1U, false);
+      if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+      error = append_tlv(
+          payload, payload_capacity, &payload_offset,
+          CONFIGURATION_FIELD_PROJECT_API_KEY, configuration->project_api_key,
+          ITERATE_KIT_PROJECT_API_KEY_CAPACITY - 1U, false);
+      if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+    } else {
+      return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+    }
+  }
+
+  if (presence->has_status_voice) {
+    if ((size_t)configuration->status_voice >=
+        sizeof(status_voice_names) / sizeof(status_voice_names[0])) {
+      return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+    }
+    const char *voice_name =
+        iterate_kit_status_voice_name((enum iterate_kit_status_voice)configuration->status_voice);
+    error = append_tlv(
+        payload, payload_capacity, &payload_offset,
+        CONFIGURATION_FIELD_STATUS_VOICE, voice_name, 32U, false);
+    if (error != ITERATE_KIT_CONFIGURATION_OK) return error;
+  }
+
+  memcpy(image, configuration_magic_prefix, sizeof(configuration_magic_prefix));
+  image[sizeof(configuration_magic_prefix)] = '1';
+  write_u32_le(image + 8U, (uint32_t)payload_offset);
+  write_u32_le(image + 12U, configuration_crc32(payload, payload_offset));
+
+  const size_t total = ITERATE_KIT_CONFIGURATION_HEADER_SIZE + payload_offset;
+  if (total < capacity) {
+    memset(image + total, 0xff, capacity - total);
+  }
+  if (written_size != NULL) *written_size = total;
+  return ITERATE_KIT_CONFIGURATION_OK;
+}
+
+enum iterate_kit_configuration_error
+iterate_kit_configuration_normalize_mind_origin(
+    const char *typed, char *destination, size_t capacity) {
+  char lower[ITERATE_KIT_OS_BASE_URL_CAPACITY];
+  const char *start;
+  const char *end;
+  const char *scheme = "https://";
+  bool explicit_scheme = false;
+  size_t length;
+
+  if (destination != NULL && capacity > 0U) destination[0] = '\0';
+  if (typed == NULL || destination == NULL || capacity == 0U) {
+    return ITERATE_KIT_CONFIGURATION_INVALID_ARGUMENT;
+  }
+  start = typed;
+  while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') ++start;
+  end = start + strlen(start);
+  while (end > start &&
+         (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) {
+    --end;
+  }
+  if (end == start) return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+
+  /* Strip one optional trailing slash. */
+  if (end > start && end[-1] == '/') --end;
+  length = (size_t)(end - start);
+  if (length == 0U || length >= sizeof(lower)) {
+    return length == 0U ? ITERATE_KIT_CONFIGURATION_INVALID_VALUE
+                        : ITERATE_KIT_CONFIGURATION_FIELD_TOO_LONG;
+  }
+  for (size_t index = 0U; index < length; ++index) {
+    char c = start[index];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    lower[index] = c;
+  }
+  lower[length] = '\0';
+
+  const char *host = lower;
+  if (strncmp(lower, "https://", 8U) == 0) {
+    scheme = "https://";
+    host = lower + 8U;
+    explicit_scheme = true;
+  } else if (strncmp(lower, "http://", 7U) == 0) {
+    scheme = "http://";
+    host = lower + 7U;
+    explicit_scheme = true;
+  } else if (strstr(lower, "://") != NULL) {
+    return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+  }
+
+  /* Strip optional trailing DNS dot. */
+  size_t host_len = strlen(host);
+  if (host_len > 0U && host[host_len - 1U] == '.') {
+    lower[(size_t)(host - lower) + host_len - 1U] = '\0';
+    --host_len;
+  }
+  if (host_len == 0U) return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+
+  /* A bare mind domain like `example.com` maps to `https://iterate.example.com`;
+   * an already-prefixed `iterate.example.com` or explicit scheme keeps its host. */
+  const bool add_iterate_prefix =
+      !explicit_scheme &&
+      strncmp(host, "iterate.", 8U) != 0 &&
+      strncmp(host, "localhost", 9U) != 0;
+  if (!explicit_scheme && strchr(host, '.') == NULL) {
+    return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+  }
+
+  const char *prefix = add_iterate_prefix ? "iterate." : "";
+  const size_t scheme_len = strlen(scheme);
+  const size_t prefix_len = strlen(prefix);
+  if (scheme_len + prefix_len + host_len + 1U > capacity) {
+    return ITERATE_KIT_CONFIGURATION_FIELD_TOO_LONG;
+  }
+  memcpy(destination, scheme, scheme_len);
+  memcpy(destination + scheme_len, prefix, prefix_len);
+  memcpy(destination + scheme_len + prefix_len, host, host_len + 1U);
+  if (!valid_base_url(destination)) {
+    destination[0] = '\0';
+    return ITERATE_KIT_CONFIGURATION_INVALID_VALUE;
+  }
+  return ITERATE_KIT_CONFIGURATION_OK;
+}
+
+void iterate_kit_configuration_clear_wifi(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence) {
+  if (configuration != NULL) {
+    memset(configuration->wifi_ssid, 0, sizeof(configuration->wifi_ssid));
+    memset(configuration->wifi_password, 0, sizeof(configuration->wifi_password));
+  }
+  if (presence != NULL) {
+    presence->has_wifi = false;
+  }
 }

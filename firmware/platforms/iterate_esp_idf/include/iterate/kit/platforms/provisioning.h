@@ -81,6 +81,48 @@ bool iterate_kit_platform_refresh_token_store(
     const struct iterate_kit_configuration *configuration,
     const char *token);
 
+/** Erase any stored rotated refresh token from NVS (on mind change or full wipe). */
+void iterate_kit_platform_refresh_token_clear(void);
+
+/**
+ * Read the `iterate_kit` partition allowing partial configurations (Wi-Fi-only
+ * or mind-only). An erased partition (all 0xFF) is reported as DECODE_FAILED /
+ * INVALID_MAGIC with `presence` cleared, which selects Setup AP mode.
+ */
+struct iterate_kit_platform_provisioning_result
+iterate_kit_platform_read_stored_provisioning(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence);
+
+/**
+ * Encode `configuration` (for groups enabled in `presence`) as an ITERKIT1
+ * image, erase and write the `iterate_kit` partition, and verify read-back.
+ */
+bool iterate_kit_platform_write_provisioning(
+    const struct iterate_kit_configuration *configuration,
+    const struct iterate_kit_configuration_presence *presence);
+
+/**
+ * Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password while preserving
+ * any saved mind/project credential, rotated refresh token, and status voice.
+ * If no mind/project or status voice was saved, erases the partition cleanly.
+ */
+bool iterate_kit_platform_clear_wifi_provisioning(void);
+
+/**
+ * Full wipe: erase the `iterate_kit` partition, drop any rotated refresh token
+ * in NVS (`iterate_token`), and reset kept speaker volume. Preserves the
+ * per-device setup code in NVS so the physical QR/setup card stays valid.
+ */
+bool iterate_kit_platform_wipe_provisioning(void);
+
+/**
+ * Load the per-device 9-char setup code (`xxxx-xxxx`) from NVS (`kit_setup`),
+ * or generate one with hardware entropy (`esp_fill_random`) on first boot and
+ * persist it. Returns true if `out` holds a valid code.
+ */
+bool iterate_kit_platform_setup_code_load_or_create(char out[10]);
+
 #ifdef __cplusplus
 }
 #endif

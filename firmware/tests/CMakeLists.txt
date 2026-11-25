@@ -65,7 +65,10 @@ iterate_kit_add_test(iterate-kit-wake-word-test
 
 iterate_kit_add_core_test(iterate-kit-atomic-test atomic_test.c)
 iterate_kit_add_core_test(iterate-kit-button-test button_test.c)
+iterate_kit_add_core_test(iterate-kit-captive-dns-test captive_dns_test.c)
 iterate_kit_add_core_test(iterate-kit-configuration-test configuration_test.c)
+iterate_kit_add_core_test(iterate-kit-provisioning-state-test provisioning_state_test.c)
+iterate_kit_add_core_test(iterate-kit-web-portal-test web_portal_test.c)
 iterate_kit_add_core_test(
   iterate-kit-conversation-lights-test conversation_lights_test.c)
 iterate_kit_add_core_test(
@@ -242,6 +245,10 @@ iterate_kit_add_test(iterate-kit-pcm-format-test pcm_format_test.c
 # The HAVPE dial is a pure resolution-2 quadrature decoder.
 iterate_kit_add_havpe_pure_test(iterate-kit-havpe-dial-test
   havpe_dial_test.c ../devices/havpe/havpe_dial.c)
+
+# HAVPE physical recovery gestures and mode ring renderers are pure C.
+iterate_kit_add_havpe_pure_test(iterate-kit-havpe-reset-gesture-test
+  havpe_reset_gesture_test.c ../devices/havpe/havpe_reset_gesture.c)
 
 # StackChan's adopted pure DSP primitives (components/audio): the AEC cadence
 # bridge, reference scaler and near high-pass, each with the donor's host

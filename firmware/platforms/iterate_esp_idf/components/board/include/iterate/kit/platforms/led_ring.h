@@ -29,6 +29,11 @@ bool iterate_kit_led_ring_present(
 /** Overlay a dim white volume bar, or one red light at zero, for hold_ms.
  * Muted, failed, and restart-armed visual states outrank this overlay. */
 void iterate_kit_led_ring_show_volume(uint8_t percent, uint32_t hold_ms);
+/** Overlay twelve explicit logical pixels for hold_ms, outranking mute and
+ * normal conversation visuals (used for setup mode and physical reset holds). */
+void iterate_kit_led_ring_show_pixels(
+    const struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT],
+    uint32_t hold_ms);
 
 #ifdef __cplusplus
 }

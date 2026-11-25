@@ -1,6 +1,8 @@
 #include "iterate/kit/platforms/provisioning.h"
+#include "iterate/kit/provisioning_state.h"
 
 #include "esp_partition.h"
+#include "esp_random.h"
 #include "nvs.h"
 
 #include <stdio.h>
@@ -193,4 +195,179 @@ bool iterate_kit_platform_refresh_token_store(
       nvs_commit(handle) == ESP_OK;
   nvs_close(handle);
   return stored;
+}
+
+void iterate_kit_platform_refresh_token_clear(void) {
+  nvs_handle_t handle;
+  if (nvs_open(token_namespace, NVS_READWRITE, &handle) != ESP_OK) return;
+  (void)nvs_erase_all(handle);
+  (void)nvs_commit(handle);
+  nvs_close(handle);
+}
+
+struct iterate_kit_platform_provisioning_result
+iterate_kit_platform_read_stored_provisioning(
+    struct iterate_kit_configuration *configuration,
+    struct iterate_kit_configuration_presence *presence) {
+  const esp_partition_t *partition;
+  const void *mapped_image = NULL;
+  esp_partition_mmap_handle_t mapping = 0U;
+  esp_err_t map_error;
+  enum iterate_kit_configuration_error decode_error;
+
+  if (presence != NULL) memset(presence, 0, sizeof(*presence));
+  if (configuration == NULL || presence == NULL) {
+    return result(
+        ITERATE_KIT_PLATFORM_PROVISIONING_INVALID_ARGUMENT,
+        ITERATE_KIT_CONFIGURATION_INVALID_ARGUMENT,
+        0);
+  }
+  memset(configuration, 0, sizeof(*configuration));
+  partition = esp_partition_find_first(
+      (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
+      (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
+      iterate_kit_partition_label);
+  if (partition == NULL) {
+    return result(
+        ITERATE_KIT_PLATFORM_PROVISIONING_PARTITION_NOT_FOUND,
+        ITERATE_KIT_CONFIGURATION_INVALID_ARGUMENT,
+        0);
+  }
+  if (partition->size < ITERATE_KIT_CONFIGURATION_HEADER_SIZE) {
+    return result(
+        ITERATE_KIT_PLATFORM_PROVISIONING_PARTITION_TOO_SMALL,
+        ITERATE_KIT_CONFIGURATION_TRUNCATED,
+        0);
+  }
+  map_error = esp_partition_mmap(
+      partition, 0U, partition->size, ESP_PARTITION_MMAP_DATA, &mapped_image, &mapping);
+  if (map_error != ESP_OK || mapped_image == NULL) {
+    return result(
+        ITERATE_KIT_PLATFORM_PROVISIONING_MMAP_FAILED,
+        ITERATE_KIT_CONFIGURATION_INVALID_ARGUMENT,
+        (int32_t)map_error);
+  }
+  decode_error = iterate_kit_configuration_decode_stored(
+      configuration, presence, mapped_image, partition->size);
+  esp_partition_munmap(mapping);
+  if (decode_error != ITERATE_KIT_CONFIGURATION_OK) {
+    return result(
+        ITERATE_KIT_PLATFORM_PROVISIONING_DECODE_FAILED,
+        decode_error,
+        0);
+  }
+  return result(
+      ITERATE_KIT_PLATFORM_PROVISIONING_OK,
+      ITERATE_KIT_CONFIGURATION_OK,
+      0);
+}
+
+bool iterate_kit_platform_write_provisioning(
+    const struct iterate_kit_configuration *configuration,
+    const struct iterate_kit_configuration_presence *presence) {
+  static uint8_t image[4096];
+  const esp_partition_t *partition;
+  size_t written = 0U;
+  struct iterate_kit_configuration verify_cfg;
+  struct iterate_kit_configuration_presence verify_presence;
+  if (configuration == NULL || presence == NULL) return false;
+  partition = esp_partition_find_first(
+      (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
+      (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
+      iterate_kit_partition_label);
+  if (partition == NULL || partition->size > sizeof(image) ||
+      partition->size < ITERATE_KIT_CONFIGURATION_HEADER_SIZE) {
+    return false;
+  }
+  if (iterate_kit_configuration_encode(
+          configuration, presence, image, partition->size, &written) !=
+      ITERATE_KIT_CONFIGURATION_OK) {
+    memset(image, 0, sizeof(image));
+    return false;
+  }
+  const bool ok =
+      esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK &&
+      esp_partition_write(partition, 0U, image, written) == ESP_OK;
+  memset(image, 0, sizeof(image));
+  if (!ok) return false;
+  const struct iterate_kit_platform_provisioning_result readback =
+      iterate_kit_platform_read_stored_provisioning(&verify_cfg, &verify_presence);
+  memset(&verify_cfg, 0, sizeof(verify_cfg));
+  return readback.status == ITERATE_KIT_PLATFORM_PROVISIONING_OK &&
+      verify_presence.has_wifi == presence->has_wifi &&
+      verify_presence.has_platform == presence->has_platform;
+}
+
+bool iterate_kit_platform_clear_wifi_provisioning(void) {
+  struct iterate_kit_configuration cfg;
+  struct iterate_kit_configuration_presence presence;
+  const struct iterate_kit_platform_provisioning_result loaded =
+      iterate_kit_platform_read_stored_provisioning(&cfg, &presence);
+  if (loaded.status != ITERATE_KIT_PLATFORM_PROVISIONING_OK) {
+    /* Already unprovisioned or corrupt: erase only the partition. */
+    const esp_partition_t *partition = esp_partition_find_first(
+        (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
+        (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
+        iterate_kit_partition_label);
+    return partition != NULL &&
+        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK;
+  }
+  iterate_kit_configuration_clear_wifi(&cfg, &presence);
+  if (!presence.has_platform && !presence.has_status_voice) {
+    const esp_partition_t *partition = esp_partition_find_first(
+        (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
+        (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
+        iterate_kit_partition_label);
+    memset(&cfg, 0, sizeof(cfg));
+    return partition != NULL &&
+        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK;
+  }
+  const bool ok = iterate_kit_platform_write_provisioning(&cfg, &presence);
+  memset(&cfg, 0, sizeof(cfg));
+  return ok;
+}
+
+bool iterate_kit_platform_wipe_provisioning(void) {
+  const esp_partition_t *partition = esp_partition_find_first(
+      (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
+      (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
+      iterate_kit_partition_label);
+  nvs_handle_t handle;
+  iterate_kit_platform_refresh_token_clear();
+  if (nvs_open("kit", NVS_READWRITE, &handle) == ESP_OK) {
+    (void)nvs_erase_key(handle, "volume");
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+  }
+  return partition != NULL &&
+      esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK;
+}
+
+static const char setup_namespace[] = "kit_setup";
+
+bool iterate_kit_platform_setup_code_load_or_create(char out[10]) {
+  nvs_handle_t handle;
+  char stored[10] = {0};
+  size_t size = sizeof(stored);
+  uint8_t entropy[8];
+  if (out == NULL) return false;
+  out[0] = '\0';
+  if (nvs_open(setup_namespace, NVS_READONLY, &handle) == ESP_OK) {
+    const esp_err_t err = nvs_get_str(handle, "code", stored, &size);
+    nvs_close(handle);
+    if (err == ESP_OK && iterate_kit_setup_code_valid(stored)) {
+      memcpy(out, stored, 10U);
+      memset(stored, 0, sizeof(stored));
+      return true;
+    }
+  }
+  esp_fill_random(entropy, sizeof(entropy));
+  iterate_kit_setup_code_format(entropy, out);
+  memset(entropy, 0, sizeof(entropy));
+  if (nvs_open(setup_namespace, NVS_READWRITE, &handle) == ESP_OK) {
+    (void)nvs_set_str(handle, "code", out);
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+  }
+  return iterate_kit_setup_code_valid(out);
 }

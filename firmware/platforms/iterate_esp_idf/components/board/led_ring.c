@@ -50,6 +50,8 @@ static struct {
   struct iterate_kit_rgb8 shown[12];
   struct iterate_kit_rgb8 volume[12];
   int64_t volume_until_us;
+  struct iterate_kit_rgb8 custom[12];
+  int64_t custom_until_us;
   struct iterate_kit_conversation_ring animation;
 } ring;
 
@@ -93,17 +95,29 @@ void iterate_kit_led_ring_show_volume(uint8_t percent, uint32_t hold_ms) {
   ring.volume_until_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
 }
 
+void iterate_kit_led_ring_show_pixels(
+    const struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT],
+    uint32_t hold_ms) {
+  if (pixels == NULL) return;
+  memcpy(ring.custom, pixels, sizeof(ring.custom));
+  ring.custom_until_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
+}
+
 bool iterate_kit_led_ring_present(
     const struct iterate_kit_conversation_visual_state *state, int64_t now_us) {
   if (ring.strip == NULL || now_us - ring.last_refresh_us < 50000) return false;
 
   struct iterate_kit_rgb8 lights[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
-  iterate_kit_conversation_ring_animate(
-      &ring.animation, state, (uint32_t)(now_us / 1000), lights);
-  const bool system_override = state != NULL &&
-      (state->media_failed || state->microphone_muted || state->restart_armed);
-  if (!system_override && now_us < ring.volume_until_us) {
-    memcpy(lights, ring.volume, sizeof(lights));
+  if (now_us < ring.custom_until_us) {
+    memcpy(lights, ring.custom, sizeof(lights));
+  } else {
+    iterate_kit_conversation_ring_animate(
+        &ring.animation, state, (uint32_t)(now_us / 1000), lights);
+    const bool system_override = state != NULL &&
+        (state->media_failed || state->microphone_muted || state->restart_armed);
+    if (!system_override && now_us < ring.volume_until_us) {
+      memcpy(lights, ring.volume, sizeof(lights));
+    }
   }
 
   /* This is the animation cadence even when pixels are unchanged or the RMT

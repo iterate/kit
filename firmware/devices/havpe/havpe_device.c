@@ -14,8 +14,12 @@
 
 #include "iterate/kit/platforms/board.h"
 #include "iterate/kit/platforms/aic3204.h"
+#include "iterate/kit/platforms/provisioning.h"
 #include "iterate/kit/platforms/xmos_i2c.h"
+#include "iterate/kit/provisioning_state.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "havpe_portal.h"
 #include "havpe_ui.h"
 
 /*
@@ -280,7 +284,29 @@ static const struct iterate_kit_board board = {
   .extra = &ops,
 };
 
-/** ESP-IDF entry point: run this board through the shared voice loop. */
+/** ESP-IDF entry point: select Setup AP, LAN Awaiting-Mind, or Normal voice mode. */
 void app_main(void) {
-  iterate_kit_board_run(&board);
+  esp_err_t nvs = nvs_flash_init();
+  if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs = nvs_flash_erase();
+    if (nvs == ESP_OK) nvs = nvs_flash_init();
+  }
+  if (nvs != ESP_OK) ESP_LOGE(tag, "NVS not started: %s", esp_err_to_name(nvs));
+
+  struct iterate_kit_configuration stored_cfg;
+  struct iterate_kit_configuration_presence presence;
+  (void)iterate_kit_platform_read_stored_provisioning(&stored_cfg, &presence);
+
+  switch (iterate_kit_provisioning_boot_mode(&presence)) {
+    case ITERATE_KIT_BOOT_MODE_SETUP_AP:
+      havpe_portal_run_setup_ap(&board.ring, &stored_cfg, &presence);
+      return;
+    case ITERATE_KIT_BOOT_MODE_LAN_UNLINKED:
+      havpe_portal_run_lan_unlinked(&board.ring, &stored_cfg, &presence);
+      return;
+    case ITERATE_KIT_BOOT_MODE_NORMAL:
+      havpe_portal_prepare_normal(&stored_cfg, &presence);
+      iterate_kit_board_run(&board);
+      return;
+  }
 }
