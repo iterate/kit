@@ -3,7 +3,6 @@
 #include "havpe_reset_gesture.h"
 #include "iterate/kit/captive_dns.h"
 #include "iterate/kit/platforms/board.h"
-#include "iterate/kit/platforms/itx_transport.h"
 #include "iterate/kit/platforms/led_ring.h"
 #include "iterate/kit/platforms/provisioning.h"
 #include "iterate/kit/platforms/restart_note.h"
@@ -222,13 +221,80 @@ static void init_identity_base(
  * pairing pattern require `portal.rf_entropy_ready == true`, which is set ONLY
  * after `esp_wifi_start()` succeeds in each boot mode.
  */
+static bool load_or_create_setup_code(char out[ITERATE_KIT_SETUP_CODE_CAPACITY]) {
+  static const char setup_namespace[] = "kit_setup";
+  nvs_handle_t handle;
+  char stored[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
+  char candidate[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
+  char verify[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
+  size_t size = sizeof(stored);
+  uint8_t entropy[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES];
+  if (out == NULL) return false;
+  out[0] = '\0';
+
+  esp_err_t err = nvs_open(setup_namespace, NVS_READONLY, &handle);
+  if (err == ESP_OK) {
+    const esp_err_t get_err = nvs_get_str(handle, "code", stored, &size);
+    nvs_close(handle);
+    if (get_err == ESP_OK && iterate_kit_setup_code_valid(stored)) {
+      memcpy(out, stored, ITERATE_KIT_SETUP_CODE_CAPACITY);
+      memset(stored, 0, sizeof(stored));
+      return true;
+    }
+    memset(stored, 0, sizeof(stored));
+    if (get_err != ESP_ERR_NVS_NOT_FOUND) return false;
+  } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+    return false;
+  }
+
+  /* Caller guarantees Wi-Fi RF is active so esp_fill_random uses HWRNG noise. */
+  esp_fill_random(entropy, sizeof(entropy));
+  iterate_kit_setup_code_format(entropy, candidate);
+  memset(entropy, 0, sizeof(entropy));
+  if (!iterate_kit_setup_code_valid(candidate)) {
+    memset(candidate, 0, sizeof(candidate));
+    return false;
+  }
+
+  /* Persist to NVS and read back before opening the SoftAP. */
+  if (nvs_open(setup_namespace, NVS_READWRITE, &handle) != ESP_OK) {
+    memset(candidate, 0, sizeof(candidate));
+    return false;
+  }
+  const bool committed =
+      nvs_set_str(handle, "code", candidate) == ESP_OK &&
+      nvs_commit(handle) == ESP_OK;
+  nvs_close(handle);
+  if (!committed) {
+    memset(candidate, 0, sizeof(candidate));
+    return false;
+  }
+
+  size_t verify_size = sizeof(verify);
+  bool verified = false;
+  if (nvs_open(setup_namespace, NVS_READONLY, &handle) == ESP_OK) {
+    verified = nvs_get_str(handle, "code", verify, &verify_size) == ESP_OK &&
+        iterate_kit_setup_code_valid(verify) &&
+        strcmp(verify, candidate) == 0;
+    nvs_close(handle);
+  }
+  if (verified) {
+    memcpy(out, verify, ITERATE_KIT_SETUP_CODE_CAPACITY);
+  } else {
+    memset(out, 0, ITERATE_KIT_SETUP_CODE_CAPACITY);
+  }
+  memset(candidate, 0, sizeof(candidate));
+  memset(verify, 0, sizeof(verify));
+  return verified;
+}
+
 static bool init_setup_ap_passphrase_with_rf_active(void) {
   char qr[ITERATE_KIT_WIFI_QR_CAPACITY];
   if (!portal.rf_entropy_ready) {
     ESP_LOGE(tag, "refusing to initialize setup code before Wi-Fi RF HWRNG is active");
     return false;
   }
-  if (!iterate_kit_platform_setup_code_load_or_create(portal.setup_code)) {
+  if (!load_or_create_setup_code(portal.setup_code)) {
     memset(portal.setup_code, 0, sizeof(portal.setup_code));
     ESP_LOGE(tag, "failed to persist and verify setup code in NVS");
     return false;
@@ -274,12 +340,14 @@ static void flash_confirm_and_restart(
   iterate_kit_platform_restart_with_note(note);
 }
 
-static void halt_with_erase_failure(const char *action) {
+static void flash_fault_and_restart(const char *action, const char *note) {
   ESP_LOGE(
-      tag, "%s FAILED erase or read-back verification — credentials may remain on flash; "
-           "showing fault ring instead of success",
+      tag,
+      "%s FAILED erase or read-back verification — credentials may remain on flash; "
+      "showing fault ring for 3 s then restarting",
       action);
-  for (;;) {
+  const uint64_t end_ms = monotonic_ms() + 3000U;
+  while (monotonic_ms() < end_ms) {
     (void)esp_task_wdt_reset();
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     havpe_ring_render_erase_error((uint32_t)monotonic_ms(), pixels);
@@ -287,6 +355,7 @@ static void halt_with_erase_failure(const char *action) {
     (void)iterate_kit_led_ring_present(NULL, esp_timer_get_time());
     vTaskDelay(pdMS_TO_TICKS(40));
   }
+  iterate_kit_platform_restart_with_note(note);
 }
 
 /*
@@ -324,7 +393,7 @@ static void execute_wifi_reset(void) {
   const bool ok = iterate_kit_platform_clear_wifi_provisioning();
   if (portal.lock != NULL) xSemaphoreGive(portal.lock);
   if (!ok) {
-    halt_with_erase_failure("Wi-Fi reset");
+    flash_fault_and_restart("Wi-Fi reset", "wifi-reset-failed");
   }
   flash_confirm_and_restart((struct iterate_kit_rgb8){0U, 36U, 48U}, "wifi-reset");
 }
@@ -332,17 +401,12 @@ static void execute_wifi_reset(void) {
 static void execute_full_wipe(void) {
   ESP_LOGW(
       tag,
-      "full wipe triggered — revoking live transport session, latching portal & token writers off, "
-      "clearing RAM, flash, NVS token, backup and volume");
+      "full wipe triggered — latching portal & token writers off, clearing RAM, flash, "
+      "NVS token and volume, then restarting");
   __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
-  /*
-   * End the board's live session BEFORE trying any flash/NVS erase: permanently
-   * disables refresh-token NVS writes, closes any open WebSocket/TLS stream on
-   * `iterate-net`, zeroes cached access/refresh tokens and Authorization headers
-   * in RAM, and waits for `iterate-net` to park so even a failed erase halted
-   * on the fault ring cannot reconnect with cached credentials.
-   */
-  const bool revoked = iterate_kit_itx_transport_revoke_session();
+  /* Latch refresh-token NVS writes off before erasing so `iterate-net` cannot
+   * commit a rotated token between verification and `esp_restart()`. */
+  iterate_kit_platform_refresh_token_disable_writes();
   if (portal.lock != NULL) (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
   iterate_kit_portal_guard_disable_writes(&portal.guard);
   portal.reboot_pending = false;
@@ -350,8 +414,8 @@ static void execute_full_wipe(void) {
   memset(&portal.presence, 0, sizeof(portal.presence));
   const bool wiped = iterate_kit_platform_wipe_provisioning();
   if (portal.lock != NULL) xSemaphoreGive(portal.lock);
-  if (!revoked || !wiped) {
-    halt_with_erase_failure("full wipe");
+  if (!wiped) {
+    flash_fault_and_restart("full wipe", "factory-wipe-failed");
   }
   flash_confirm_and_restart((struct iterate_kit_rgb8){48U, 4U, 0U}, "factory-wipe");
 }
@@ -1238,7 +1302,7 @@ static void handle_gesture_and_claim_cancel(
       (!muted || (vis != HAVPE_VISUAL_NONE && vis != HAVPE_VISUAL_UNLOCK_FLASH))) {
     portal.last_shown_claim_id = 0U;
     portal.staged_claim_id = 0U;
-    if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
+    if (xSemaphoreTake(portal.lock, portMAX_DELAY) == pdTRUE) {
       if (portal.guard.claim_state != ITERATE_KIT_CLAIM_NONE) {
         iterate_kit_portal_guard_cancel_claim(&portal.guard);
         ESP_LOGI(tag, "pending LAN pairing cancelled");
@@ -1248,9 +1312,14 @@ static void handle_gesture_and_claim_cancel(
   }
 }
 
+/*
+ * Unconditional dwell update: never use a try-lock here so a failed LED refresh
+ * or overlay takeover can never be dropped while an HTTP handler holds
+ * `portal.lock` (which is never held across network I/O).
+ */
 static void note_claim_pattern_refresh(
     uint32_t claim_id, bool shown_ok, uint64_t now_ms) {
-  if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
+  if (xSemaphoreTake(portal.lock, portMAX_DELAY) == pdTRUE) {
     iterate_kit_portal_guard_note_pattern_refresh(
         &portal.guard, claim_id, shown_ok, now_ms);
     xSemaphoreGive(portal.lock);
@@ -1261,7 +1330,7 @@ static void note_claim_pattern_refresh(
  * Prepare the LED pixels for any active pairing state WITHOUT starting the 2 s
  * confirmation dwell timer. Dwell is started and maintained ONLY after
  * `iterate_kit_led_ring_present()` reports a real (non-throttled) refresh as
- * displayed; a failed refresh resets the dwell.
+ * displayed; a failed refresh resets the dwell unconditionally.
  */
 static bool prepare_claim_ring_overlay(
     uint64_t now_ms,
@@ -1271,7 +1340,7 @@ static bool prepare_claim_ring_overlay(
   uint32_t claim_id = 0U;
   struct iterate_kit_claim_pattern pattern = {0};
   if (out_claim_id != NULL) *out_claim_id = 0U;
-  if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
+  if (xSemaphoreTake(portal.lock, portMAX_DELAY) == pdTRUE) {
     state = iterate_kit_portal_guard_claim_state(&portal.guard, now_ms);
     if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
       (void)iterate_kit_portal_guard_active_claim_pattern(

@@ -287,65 +287,9 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
          ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED);
 }
 
-static void decides_wifi_reset_backup_recovery_and_roundtrips_mind_image(void) {
-  /* Valid partition always wins (e.g. fresh USB flash from Kit Flasher). */
-  assert(iterate_kit_provisioning_wifi_reset_recovery(true, false, false) ==
-         ITERATE_KIT_RECOVERY_USE_PARTITION);
-  assert(iterate_kit_provisioning_wifi_reset_recovery(true, false, true) ==
-         ITERATE_KIT_RECOVERY_USE_PARTITION);
-  assert(iterate_kit_provisioning_wifi_reset_recovery(true, true, false) ==
-         ITERATE_KIT_RECOVERY_USE_PARTITION_AND_CLEAR_BACKUP);
-  assert(iterate_kit_provisioning_wifi_reset_recovery(true, true, true) ==
-         ITERATE_KIT_RECOVERY_USE_PARTITION_AND_CLEAR_BACKUP);
-
-  /* Invalid/erased partition restores ONLY when backup is present, pending, and valid. */
-  assert(iterate_kit_provisioning_wifi_reset_recovery(false, true, true) ==
-         ITERATE_KIT_RECOVERY_RESTORE_FROM_BACKUP);
-  assert(iterate_kit_provisioning_wifi_reset_recovery(false, true, false) ==
-         ITERATE_KIT_RECOVERY_CLEAR_INVALID_BACKUP);
-  assert(iterate_kit_provisioning_wifi_reset_recovery(false, false, false) ==
-         ITERATE_KIT_RECOVERY_UNPROVISIONED);
-  assert(iterate_kit_provisioning_wifi_reset_recovery(false, false, true) ==
-         ITERATE_KIT_RECOVERY_UNPROVISIONED);
-
-  /* Verify a Wi-Fi-cleared mind-only backup blob encodes <= 1024 B and round-trips cleanly. */
-  struct iterate_kit_configuration cfg = {0};
-  struct iterate_kit_configuration_presence pres = {0};
-  struct iterate_kit_configuration decoded = {0};
-  struct iterate_kit_configuration_presence decoded_pres = {0};
-  uint8_t image[1024];
-  size_t written = 0U;
-
-  cfg.platform = ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
-  cfg.status_voice = ITERATE_KIT_STATUS_VOICE_DAISY_BELL;
-  memcpy(cfg.wifi_ssid, "HomeWiFi", 9U);
-  memcpy(cfg.wifi_password, "supersecret1", 13U);
-  memcpy(cfg.os_base_url, "https://iterate.example.com", 28U);
-  memcpy(cfg.oauth_client_id, "https://k.iterate.com/client", 29U);
-  memcpy(cfg.oauth_refresh_token, "u1:g1:tok_refresh_1234", 23U);
-  pres.has_wifi = true;
-  pres.has_platform = true;
-  pres.has_status_voice = true;
-
-  iterate_kit_configuration_clear_wifi(&cfg, &pres);
-  assert(!pres.has_wifi && pres.has_platform && pres.has_status_voice);
-  assert(iterate_kit_configuration_encode(&cfg, &pres, image, sizeof(image), &written) ==
-         ITERATE_KIT_CONFIGURATION_OK);
-  assert(written >= ITERATE_KIT_CONFIGURATION_HEADER_SIZE && written <= 1024U);
-  assert(iterate_kit_configuration_decode_stored(&decoded, &decoded_pres, image, written) ==
-         ITERATE_KIT_CONFIGURATION_OK);
-  assert(!decoded_pres.has_wifi && decoded_pres.has_platform && decoded_pres.has_status_voice);
-  assert(decoded.wifi_ssid[0] == '\0' && decoded.wifi_password[0] == '\0');
-  assert(strcmp(decoded.os_base_url, "https://iterate.example.com") == 0);
-  assert(strcmp(decoded.oauth_refresh_token, "u1:g1:tok_refresh_1234") == 0);
-  assert(decoded.status_voice == ITERATE_KIT_STATUS_VOICE_DAISY_BELL);
-  assert(iterate_kit_provisioning_boot_mode(&decoded_pres) == ITERATE_KIT_BOOT_MODE_SETUP_AP);
-}
-
 int main(void) {
   selects_boot_mode_from_configuration_presence();
   derives_identity_setup_code_and_qr();
   enforces_visual_claim_confirmation_and_client_isolation();
-  decides_wifi_reset_backup_recovery_and_roundtrips_mind_image();
   return 0;
 }

@@ -84,11 +84,9 @@ bool iterate_kit_platform_refresh_token_store(
 /**
  * Permanently disable rotated refresh-token NVS writes (latched before a full
  * wipe so the background network task cannot commit a fresh token back to NVS
- * after the erase has been verified).
+ * between the erase and the restart).
  */
 void iterate_kit_platform_refresh_token_disable_writes(void);
-
-bool iterate_kit_platform_refresh_token_writes_disabled(void);
 
 /**
  * Erase any stored rotated refresh token from NVS (on mind change or full wipe)
@@ -98,13 +96,8 @@ bool iterate_kit_platform_refresh_token_clear(void);
 
 /**
  * Read the `iterate_kit` partition allowing partial configurations (Wi-Fi-only
- * or mind-only). If a previous Wi-Fi-only reset lost power after erasing
- * `iterate_kit`, transparently restores the verified pending NVS backup
- * (`kit_wifi_rst`) back into `iterate_kit` and clears the backup. A valid
- * `iterate_kit` partition always wins and clears any stale backup so a fresh
- * Kit Flasher USB flash is never overwritten. An erased partition (all 0xFF)
- * without a pending backup is reported as DECODE_FAILED / INVALID_MAGIC with
- * `presence` cleared, selecting Setup AP mode.
+ * or mind-only). An erased partition (all 0xFF) is reported as DECODE_FAILED /
+ * INVALID_MAGIC with `presence` cleared, selecting Setup AP mode.
  */
 struct iterate_kit_platform_provisioning_result
 iterate_kit_platform_read_stored_provisioning(
@@ -113,45 +106,25 @@ iterate_kit_platform_read_stored_provisioning(
 
 /**
  * Encode `configuration` (for groups enabled in `presence`) as an ITERKIT1
- * image, erase and write the `iterate_kit` partition, verify read-back, and
- * clear any stale Wi-Fi-reset NVS backup.
+ * image, erase and write the `iterate_kit` partition, and verify read-back.
  */
 bool iterate_kit_platform_write_provisioning(
     const struct iterate_kit_configuration *configuration,
     const struct iterate_kit_configuration_presence *presence);
 
 /**
- * Power-loss-safe Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password
- * while preserving any saved mind/project credential, rotated refresh token,
- * and status voice. Fails closed without erasing the partition if the current
- * configuration cannot be read or if staging a verified pending copy of the
- * retained image in NVS (`kit_wifi_rst`) fails before the sector erase. Clears
- * and verifies the NVS backup only after the rewritten `iterate_kit` partition
- * reads back Wi-Fi-free.
+ * Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password while preserving
+ * any saved mind/project credential, rotated refresh token, and status voice.
+ * Fails closed without erasing if the partition cannot be read, then rewrites
+ * and verifies read-back.
  */
 bool iterate_kit_platform_clear_wifi_provisioning(void);
 
 /**
- * Full wipe: permanently disables refresh-token NVS writes (serializing with
- * any in-flight `itx_transport` token commit), erases the `iterate_kit`
- * partition, drops any rotated refresh token in NVS (`iterate_token`), any
- * pending Wi-Fi-reset backup (`kit_wifi_rst`), and kept speaker volume, and
- * verifies all four by read-back. Preserves the per-device setup code in NVS
- * so the physical QR/setup card stays valid.
+ * Full wipe: latches refresh-token NVS writes off, erases `iterate_kit`,
+ * `iterate_token`, and `kit/volume`, and verifies all three by read-back.
  */
 bool iterate_kit_platform_wipe_provisioning(void);
-
-/**
- * Load the per-device 14-char setup code (`xxxx-xxxx-xxxx`, 60 bits) from NVS
- * (`kit_setup`), or generate one with `esp_fill_random()` on first boot,
- * commit it to NVS, and verify it by reading it back from NVS before use.
- * Returns false and zeroes `out` if persistence or read-back fails.
- *
- * PRECONDITION: Wi-Fi/BT RF must already be started (or `bootloader_random`
- * enabled) before calling this so `esp_fill_random()` draws from the hardware
- * RNG noise source rather than an unseeded PRNG.
- */
-bool iterate_kit_platform_setup_code_load_or_create(char out[15]);
 
 #ifdef __cplusplus
 }

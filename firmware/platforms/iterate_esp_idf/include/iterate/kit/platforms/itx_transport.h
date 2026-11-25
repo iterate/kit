@@ -343,8 +343,6 @@ struct iterate_kit_itx_transport {
   uint32_t fatal_failure_reason;
   uint32_t network_task_running;
   uint32_t network_task_exited;
-  uint32_t session_revoked;
-  uint32_t session_revoked_ack;
   uint32_t websocket_started;
   uint32_t wifi_connect_attempts;
   uint32_t wifi_disconnects;
@@ -480,15 +478,6 @@ bool iterate_kit_itx_transport_credential_renewal_due(
  */
 enum iterate_kit_status iterate_kit_itx_transport_stop(
     struct iterate_kit_itx_transport *transport);
-
-/**
- * Permanently revoke the active ESP-IDF transport's live session before a full
- * wipe: disables NVS refresh-token writes, closes any open WebSocket/TLS
- * stream, zeroes cached access/refresh tokens and Authorization headers in RAM,
- * and waits (up to the stop bound) for the network task to confirm teardown and
- * park without reconnecting. Safe when no transport is active (returns true).
- */
-bool iterate_kit_itx_transport_revoke_session(void);
 
 /**
  * Reads a diagnostic snapshot concurrently with event/network task updates.
