@@ -345,22 +345,24 @@ bool iterate_kit_platform_wipe_provisioning(void) {
 
 static const char setup_namespace[] = "kit_setup";
 
-bool iterate_kit_platform_setup_code_load_or_create(char out[10]) {
+bool iterate_kit_platform_setup_code_load_or_create(
+    char out[ITERATE_KIT_SETUP_CODE_CAPACITY]) {
   nvs_handle_t handle;
-  char stored[10] = {0};
+  char stored[ITERATE_KIT_SETUP_CODE_CAPACITY] = {0};
   size_t size = sizeof(stored);
-  uint8_t entropy[8];
+  uint8_t entropy[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES];
   if (out == NULL) return false;
   out[0] = '\0';
   if (nvs_open(setup_namespace, NVS_READONLY, &handle) == ESP_OK) {
     const esp_err_t err = nvs_get_str(handle, "code", stored, &size);
     nvs_close(handle);
     if (err == ESP_OK && iterate_kit_setup_code_valid(stored)) {
-      memcpy(out, stored, 10U);
+      memcpy(out, stored, ITERATE_KIT_SETUP_CODE_CAPACITY);
       memset(stored, 0, sizeof(stored));
       return true;
     }
   }
+  /* Caller guarantees Wi-Fi RF is active so esp_fill_random uses HWRNG noise. */
   esp_fill_random(entropy, sizeof(entropy));
   iterate_kit_setup_code_format(entropy, out);
   memset(entropy, 0, sizeof(entropy));

@@ -654,7 +654,7 @@ size_t iterate_kit_web_render_page(
       w_html(&w, csrf_token);
       w_puts(&w,
           "\"><label for=sc>Setup code</label>"
-          "<input id=sc name=setup_code autocomplete=off placeholder=\"xxxx-xxxx\" required>"
+          "<input id=sc name=setup_code autocomplete=off placeholder=\"xxxx-xxxx-xxxx\" required>"
           "<button type=submit>Unlock settings (3 min)</button>"
           "<p class=hint>Find the code on the card, or slide the Mute switch ON and tap the centre button on the puck.</p>"
           "</form>");

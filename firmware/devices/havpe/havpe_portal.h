@@ -56,6 +56,13 @@ void havpe_portal_poll_normal(
     bool muted,
     uint64_t now_ms);
 
+/**
+ * Consume the one-shot call-cancel edge when an unmuted centre-button hold
+ * enters Wi-Fi reset progress (>= 1.5 s), so `board.c` emits `end_press` and
+ * never leaves a call running. App task only.
+ */
+bool havpe_portal_take_cancel_call(void);
+
 #ifdef __cplusplus
 }
 #endif

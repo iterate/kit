@@ -14,7 +14,9 @@ extern "C" {
 enum {
   ITERATE_KIT_SHORT_ID_CAPACITY = 5,
   ITERATE_KIT_HOSTNAME_CAPACITY = 16,
-  ITERATE_KIT_SETUP_CODE_CAPACITY = 10,
+  /* 12 Crockford Base32 chars grouped as xxxx-xxxx-xxxx (14 chars + NUL, 60 bits). */
+  ITERATE_KIT_SETUP_CODE_CAPACITY = 15,
+  ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES = 12,
   ITERATE_KIT_CSRF_TOKEN_CAPACITY = 17,
   ITERATE_KIT_WIFI_QR_CAPACITY = 160,
   ITERATE_KIT_PORTAL_UNLOCK_MS = 180000,
@@ -80,19 +82,21 @@ bool iterate_kit_device_hostname(
     size_t capacity);
 
 /**
- * Format 8 random bytes into a 9-character setup code `xxxx-xxxx` from an
- * unambiguous 32-character alphabet (40 bits of entropy, >= 8 chars so it also
- * serves directly as the SoftAP's WPA2-PSK passphrase).
+ * Format 12 hardware-random bytes into a 14-character setup code
+ * `xxxx-xxxx-xxxx` from the 32-character Crockford Base32 alphabet (60 bits of
+ * entropy, >= 8 chars so it serves directly as the SoftAP's WPA2-PSK passphrase
+ * while resisting offline handshake cracking).
  */
 void iterate_kit_setup_code_format(
-    const uint8_t entropy[8], char out[ITERATE_KIT_SETUP_CODE_CAPACITY]);
+    const uint8_t entropy[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES],
+    char out[ITERATE_KIT_SETUP_CODE_CAPACITY]);
 
-/** True when `code` has exact canonical form `xxxx-xxxx` from the setup alphabet. */
+/** True when `code` has exact canonical form `xxxx-xxxx-xxxx` from the setup alphabet. */
 bool iterate_kit_setup_code_valid(const char *code);
 
 /**
  * Constant-time setup-code comparison, ignoring case, spaces, and hyphens so
- * `K7M49P2X` and `k7m4-9p2x` match equivalently.
+ * `K7M49P2X3V8Q` and `k7m4-9p2x-3v8q` match equivalently.
  */
 bool iterate_kit_setup_code_equal(const char *candidate, const char *expected);
 

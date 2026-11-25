@@ -10,10 +10,28 @@ Wi-Fi cleanly.
 Each preloaded HAVPE ships with a small printed card (or bottom sticker) showing:
 
 - a standard `WIFI:T:WPA;S:iterate-<id>;P:<setup-code>;;` QR code,
-- the 9-character setup code (`xxxx-xxxx`, Crockford Base32, 40 bits of entropy), and
+- the 14-character setup code (`xxxx-xxxx-xxxx`, 12 Crockford Base32 characters, 60 bits of
+  entropy), and
 - its LAN address (`http://iterate-<id>.local/`).
 
-### First-time setup (preloaded board, no Wi-Fi yet)
+### Preloading / factory card step (before handing out a board)
+
+1. **Flash the HAVPE over USB** with the iterate firmware release (`esptool.py` / `idf.py flash`),
+   leaving the `iterate_kit` partition erased (`0xFF`).
+2. **Keep USB connected and open the USB-Serial-JTAG console** (`115200` baud) while the board
+   boots for the first time.
+3. **Read the generated setup lines.** Once Wi-Fi RF starts (enabling the ESP32-S3 hardware RNG),
+   the board generates its permanent 60-bit setup code (`xxxx-xxxx-xxxx`), saves it to NVS
+   (`kit_setup/code`), and prints two lines on serial whenever it boots into Setup Mode:
+   ```text
+   havpe-portal: setup_ap ssid=iterate-<id> setup_code=<xxxx-xxxx-xxxx>
+   havpe-portal: setup_qr WIFI:T:WPA;S:iterate-<id>;P:<xxxx-xxxx-xxxx>;;
+   ```
+4. **Print the card/sticker.** Encode the `setup_qr` string as a QR code alongside the human-readable
+   `setup_code` and `http://iterate-<id>.local/`, and pack it with that board. Because `kit_setup`
+   is preserved across both Wi-Fi resets and full wipes, the card stays valid for the board's life.
+
+### First-time setup (recipient, no USB or native app)
 
 1. **Plug in the HAVPE.** Finding no Wi-Fi credentials in the `iterate_kit` partition, it enters
    Setup Mode automatically: the 12-LED ring shows a **rotating cyan comet** and it starts a
@@ -49,6 +67,11 @@ Each preloaded HAVPE ships with a small printed card (or bottom sticker) showing
 Holding past the upper bound (`> 10 s` unmuted, `> 15 s` muted) or toggling the mute switch
 mid-hold cancels safely instead of escalating. A button held at power-on (e.g. GPIO0 boot strap)
 is ignored until released once.
+
+Because `board.c` starts voice calls on the centre button's down-edge (for minimal voice latency),
+an unmuted hold emits `end_press` once it reaches `1.5 s` (as the cyan Wi-Fi reset arc appears),
+cancelling any opening/active call cleanly so neither an aborted hold nor a completed Wi-Fi reset
+leaves a call running.
 
 ## 2. Provisioning options compared
 
@@ -90,17 +113,41 @@ is ignored until released once.
 
 ## 3. Security model
 
-| Surface                                              | Who can reach it                                                                                    | Allowed actions                                                                                                                                                                                                                                           | Protections                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **SoftAP (`iterate-<id>`, `192.168.4.1`)**           | Only someone within Wi-Fi range who has the per-device 9-char setup code (printed on the card / QR) | View setup page, scan 2.4 GHz networks, submit Wi-Fi / optional mind / settings                                                                                                                                                                           | Active **only** when Wi-Fi is unconfigured or physically reset. WPA2-PSK encrypts over-the-air traffic (home Wi-Fi password is never sent in cleartext RF). CSRF token checked on every POST. `Host` header restricted to `192.168.4.1` / `iterate-<id>.local`.                                                                                                                                                                                                                          |
-| **LAN page (`http://iterate-<id>.local/`, port 80)** | Devices on the same local network                                                                   | **Read-only (`GET /`, `GET /api/status`):** view status (Wi-Fi SSID, RSSI, IP, mind origin, connection state, firmware version, status voice, volume). **Write (`POST /wifi`, `/mind`, `/settings`, `/reset-wifi`, `/reboot`):** modify config or reboot. | Read-only endpoints **never** expose stored secrets (Wi-Fi password, OAuth refresh token, project API key, or setup code). Every mutating POST requires: (1) valid `Host` header (`iterate-<id>.local` or current LAN IP — blocks DNS rebinding), (2) per-boot CSRF token, and (3) either the per-device setup code (constant-time compare, exponential lockout after 5 wrong guesses) or a **physical presence unlock** (Mute ON + tap centre button on the puck, valid for 3 minutes). |
-| **External / cloud**                                 | None                                                                                                | None                                                                                                                                                                                                                                                      | No cloud endpoint, tunnel, or remote admin API is opened. Existing Cap'n Web session to the mind is unchanged.                                                                                                                                                                                                                                                                                                                                                                           |
+| Surface                                              | Who can reach it                                                                                     | Allowed actions                                                                                                                                                                                                                                           | Protections                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SoftAP (`iterate-<id>`, `192.168.4.1`)**           | Only someone within Wi-Fi range who has the per-device 14-char setup code (printed on the card / QR) | View setup page, scan 2.4 GHz networks, submit Wi-Fi / optional mind / settings                                                                                                                                                                           | Active **only** when Wi-Fi is unconfigured or physically reset. WPA2-PSK (60-bit hardware-random passphrase) encrypts over-the-air traffic so the home Wi-Fi password is never sent in cleartext RF. CSRF token checked on every POST. `Host` header restricted to `192.168.4.1` / `iterate-<id>.local`.                                                                                                                                                                                 |
+| **LAN page (`http://iterate-<id>.local/`, port 80)** | Devices on the same local network                                                                    | **Read-only (`GET /`, `GET /api/status`):** view status (Wi-Fi SSID, RSSI, IP, mind origin, connection state, firmware version, status voice, volume). **Write (`POST /wifi`, `/mind`, `/settings`, `/reset-wifi`, `/reboot`):** modify config or reboot. | Read-only endpoints **never** expose stored secrets (Wi-Fi password, OAuth refresh token, project API key, or setup code). Every mutating POST requires: (1) valid `Host` header (`iterate-<id>.local` or current LAN IP — blocks DNS rebinding), (2) per-boot CSRF token, and (3) either the per-device setup code (constant-time compare, exponential lockout after 5 wrong guesses) or a **physical presence unlock** (Mute ON + tap centre button on the puck, valid for 3 minutes). |
+| **USB-Serial-JTAG console**                          | Anyone with physical USB access to the puck                                                          | Reads boot logs, including `setup_ap` and `setup_qr` while in Setup Mode                                                                                                                                                                                  | Anyone with physical USB access can already trigger Mute+tap unlock, hold for Wi-Fi reset/wipe, or dump/reflash flash directly; USB serial disclosure stays inside the physical-possession boundary rather than adding a remote attack surface.                                                                                                                                                                                                                                          |
+| **External / cloud**                                 | None                                                                                                 | None                                                                                                                                                                                                                                                      | No cloud endpoint, tunnel, or remote admin API is opened. Existing Cap'n Web session to the mind is unchanged.                                                                                                                                                                                                                                                                                                                                                                           |
 
-**Trade-offs acknowledged:** LAN traffic to `http://iterate-<id>.local/` is plain HTTP (browsers do
-not trust self-signed certs for `.local`), so a passive observer on the same untrusted Wi-Fi segment
-could sniff credentials submitted on the LAN page. This is acceptable on a trusted home LAN and is
-another reason RFC 8628 device-code pairing (where the refresh token goes directly over HTTPS from
-the mind's issuer to the board) is the right next step on the platform.
+### Entropy, WPA2 offline cracking, and RNG ordering
+
+- **Why 40 bits is not enough for a WPA2 passphrase:** WPA2-PSK uses PBKDF2-HMAC-SHA1 (4,096
+  iterations). An 8-character Crockford Base32 code (40 bits, `2^40 ≈ 1.1 × 10^12` candidates) can
+  be cracked offline from a single passively captured 4-way handshake during Setup Mode in roughly
+  **8 hours (~$100–$120)** on a rented 8× RTX 4090 rig (~19M PMKs/s). Cracking it would let an
+  attacker who recorded the Setup Mode session decrypt the home Wi-Fi password submitted over HTTP,
+  and — because the same code unlocks the LAN page — later reconfigure the board on the LAN.
+- **Chosen mitigation (lengthen to 60 bits):** The setup code is lengthened to **12 Crockford
+  Base32 characters (`xxxx-xxxx-xxxx`, 60 bits, `2^60 ≈ 1.15 × 10^18`)**. Pushing the keyspace up
+  by `2^20` (1,048,576×) raises an offline WPA2 handshake attack to roughly **~960 years / >$100M**
+  on the same 8× RTX 4090 rig, while keeping a single secret on the card: phones scan it from the
+  QR code without typing, and on the LAN page users can either type the 12 characters or use Mute
+  ON + centre button tap with zero typing. If a future revision ever wants a shorter typed LAN PIN,
+  the SoftAP PSK and LAN PIN should be stored as two separate secrets.
+- **Hardware RNG ordering:** On ESP32-S3, `esp_random()` / `esp_fill_random()` return pseudo-random
+  numbers unless a hardware noise source is enabled (either Wi-Fi/BT RF or
+  `bootloader_random_enable()`). Because `bootloader_random_enable()` reconfigures SAR ADC units
+  1 & 2 on ESP32-S3 (though unlike original ESP32 it does not touch I2S) and must be disabled before
+  Wi-Fi starts, all three boot modes start Wi-Fi RF (`esp_wifi_start()`) **before** generating or
+  loading the setup code and CSRF token (in Setup AP mode, Wi-Fi starts briefly in `WIFI_MODE_STA`
+  to draw RF entropy without beaconing an unconfigured AP, then stops and starts `WIFI_MODE_APSTA`
+  with the WPA2 passphrase configured).
+- **Plain HTTP on LAN:** Traffic to `http://iterate-<id>.local/` is plain HTTP (browsers do not
+  trust self-signed certs for `.local`), so a passive observer on the same untrusted Wi-Fi segment
+  could sniff credentials submitted on the LAN page. This is acceptable on a trusted home LAN and
+  is another reason RFC 8628 device-code pairing (where the refresh token goes directly over HTTPS
+  from the mind's issuer to the board) is the right next step on the platform.
 
 ## 4. What was built, tested, and NOT proven
 
@@ -109,38 +156,41 @@ the mind's issuer to the board) is the right next step on the platform.
 - `ITERKIT1` C encoder and partial-config decoder (`components/core/src/configuration.c`), verified
   byte-for-byte against the TypeScript golden images (`configuration_test.c`), plus Wi-Fi-only,
   Wi-Fi-reset (mind preserved), password/voice validation, and mind-origin normalization.
-- Boot-mode selection, short-ID/hostname derivation, Crockford Base32 setup-code generation and
-  constant-time matching, `WIFI:` QR escaping, Host-header DNS-rebinding filter, CSRF check,
-  physical unlock window, and brute-force backoff (`provisioning_state_test.c`).
+- Boot-mode selection, short-ID/hostname derivation, 60-bit Crockford Base32 setup-code generation
+  (`xxxx-xxxx-xxxx`) and constant-time matching, `WIFI:` QR escaping, Host-header DNS-rebinding
+  filter, CSRF check, physical unlock window, and brute-force backoff (`provisioning_state_test.c`).
 - RFC 1035 captive DNS responder for A/ANY, AAAA NODATA, and malformed packets (`captive_dns_test.c`).
 - Form URL decoding, HTML XSS escaping, captive-probe detection, Wi-Fi/Mind/Settings form handling,
   and secret-redaction checks on rendered HTML and `/api/status` JSON (`web_portal_test.c`).
 - HAVPE physical recovery gesture timing (boot-held ignore, debounce, unmuted 5 s Wi-Fi reset,
-  muted 10 s full wipe, muted tap LAN unlock, mid-hold mute cancel, over-hold cancel) and LED ring
-  mode/gesture renderers (`havpe_reset_gesture_test.c`).
+  muted 10 s full wipe, muted tap LAN unlock, mid-hold mute cancel, over-hold cancel), LED ring
+  mode/gesture renderers, and end-to-end call cancellation through `button.c` + `session_grammar.c`
+  proving a Wi-Fi reset hold cancels any opening/active call at 1.5 s and never leaves a call
+  running (`havpe_reset_gesture_test.c`).
 
 ### Built only (compiled with ESP-IDF 6.1 for `esp32s3`, partition layout checked)
 
-- `iterate-kit-havpe.bin` builds cleanly under ESP-IDF 6.1 (`0x1491d0` / 1,348,048 bytes, 74% free
-  in the `0x500000` `ota_0` partition) and passes `scripts/firmware-release.ts build` (partition
-  table layout check, `iterate_kit` non-overlap check, and `filesOutsideInputs` check: 540 firmware
-  files read, all inside HAVPE's inputs).
+- `iterate-kit-havpe.bin` builds cleanly under ESP-IDF 6.1 and passes
+  `scripts/firmware-release.ts build` (partition table layout check, `iterate_kit` non-overlap
+  check, and `filesOutsideInputs` check).
 - `platforms/iterate_esp_idf/configuration.c`: flash read/write/clear-Wi-Fi/full-wipe and NVS setup
   code persistence.
 - `platforms/iterate_esp_idf/components/board/led_ring.c` and `board.c`: custom ring pixel overlay
   and current-volume getter.
-- `devices/havpe/havpe_portal.c`, `havpe_device.c`, `havpe_ui.c`: SoftAP (`WIFI_MODE_APSTA`),
-  2.4 GHz scan, UDP/53 captive DNS task, `esp_http_server` routes, `espressif/mdns` advertisement
-  (`_http._tcp` + `_iterate._tcp`), and Normal-mode integration.
+- `devices/havpe/havpe_portal.c`, `havpe_device.c`, `havpe_ui.c`: RF-first HWRNG initialization in
+  all three modes, SoftAP (`WIFI_MODE_APSTA`), 2.4 GHz scan, UDP/53 captive DNS task,
+  `esp_http_server` routes, `espressif/mdns` advertisement (`_http._tcp` + `_iterate._tcp`), and
+  Normal-mode `read_gestures` call-cancellation wiring.
 
 ### NOT proven (no hardware attached)
 
 - **Nothing ran on physical HAVPE hardware.**
+- Real hardware entropy quality on silicon and the `WIFI_MODE_STA` -> `esp_wifi_stop()` ->
+  `WIFI_MODE_APSTA` startup transition timing in Setup AP mode.
 - Real iOS (CNA) and Android (CaptivePortalLogin) captive-portal sheet pop-up behavior, QR scan
   UX, and `iterate-<id>.local` mDNS resolution on real home routers/phones.
-- Physical LED ring brightness/legibility, button/mute feel during 5 s / 10 s holds, and interaction
-  between `board.c`'s down-edge call start and the start of an unmuted 5 s Wi-Fi reset hold while
-  connected to a mind.
+- Physical LED ring brightness/legibility, button/mute feel during 5 s / 10 s holds, and audible
+  chime/status-voice feel during the 1.5 s before a Wi-Fi reset hold cancels the opening call.
 - Internal RAM headroom and audio latency when `esp_http_server` + `espressif/mdns` run alongside
   active GPT-Live audio, TLS, and WakeNet on real silicon.
 - Flash erase/rewrite durability and power-loss recovery of `iterate_kit` on real flash.

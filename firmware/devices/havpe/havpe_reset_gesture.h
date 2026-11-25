@@ -70,6 +70,8 @@ struct havpe_reset_gesture {
   bool holding;
   bool hold_muted;
   bool hold_cancelled;
+  bool cancel_call_sent;
+  bool cancel_call_pending;
   uint64_t hold_started_ms;
   uint64_t unlock_flash_until_ms;
 };
@@ -80,6 +82,15 @@ enum havpe_gesture_event havpe_reset_gesture_step(
     bool button_pressed,
     bool muted,
     uint64_t now_ms);
+
+/**
+ * Consume the one-shot edge requesting `end_press` once an unmuted hold
+ * reaches HAVPE_GESTURE_SHOW_PROGRESS_MS (1.5 s). Because `board.c` starts a
+ * voice call on the centre button's down-edge for low-latency activation, this
+ * cancels that opening/active call cleanly so a Wi-Fi reset hold (whether
+ * completed, released early, or held past 10 s) never leaves a call running.
+ */
+bool havpe_reset_gesture_take_cancel_call(struct havpe_reset_gesture *state);
 
 /** Current ring feedback state and 0..12 progress LEDs (pure query). */
 void havpe_reset_gesture_visual(

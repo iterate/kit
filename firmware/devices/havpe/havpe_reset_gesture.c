@@ -40,6 +40,7 @@ enum havpe_gesture_event havpe_reset_gesture_step(
         state->holding = true;
         state->hold_muted = muted;
         state->hold_cancelled = false;
+        state->cancel_call_sent = false;
         state->hold_started_ms = now_ms;
         return HAVPE_GESTURE_NONE;
       }
@@ -85,6 +86,13 @@ enum havpe_gesture_event havpe_reset_gesture_step(
       const uint64_t max_ms = state->hold_muted
           ? (uint64_t)HAVPE_GESTURE_FULL_WIPE_MAX_MS
           : (uint64_t)HAVPE_GESTURE_WIFI_RESET_MAX_MS;
+      if (!state->hold_muted && !state->cancel_call_sent &&
+          held_ms >= HAVPE_GESTURE_SHOW_PROGRESS_MS) {
+        /* An unmuted down-edge started (or toggled) a call; end it once this
+         * becomes a Wi-Fi reset hold so no call is left running. */
+        state->cancel_call_sent = true;
+        state->cancel_call_pending = true;
+      }
       if (held_ms >= max_ms) {
         state->hold_cancelled = true;
       }
@@ -92,6 +100,12 @@ enum havpe_gesture_event havpe_reset_gesture_step(
   }
 
   return HAVPE_GESTURE_NONE;
+}
+
+bool havpe_reset_gesture_take_cancel_call(struct havpe_reset_gesture *state) {
+  if (state == NULL || !state->cancel_call_pending) return false;
+  state->cancel_call_pending = false;
+  return true;
 }
 
 void havpe_reset_gesture_visual(

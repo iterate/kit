@@ -1,4 +1,6 @@
 #include "havpe_reset_gesture.h"
+#include "iterate/kit/button.h"
+#include "iterate/kit/session_grammar.h"
 
 #include <assert.h>
 #include <string.h>
@@ -123,10 +125,100 @@ static void renders_distinct_ring_patterns_for_modes_and_gestures(void) {
   assert(wipe_arm[0].red > 20U && wipe_arm[0].blue == 0U);
 }
 
+/*
+ * Mirror board.c's exact poll path: button.c produces `press` on the 30 ms
+ * down-edge, havpe_reset_gesture produces `end_press` once an unmuted hold
+ * reaches 1.5 s, and session_grammar turns those into `start_call`/`end_call`.
+ */
+struct call_harness {
+  struct iterate_kit_button button;
+  struct havpe_reset_gesture gesture;
+  struct iterate_kit_session session;
+  bool wants_call;
+  bool call_active;
+};
+
+static enum havpe_gesture_event step_board_and_gesture(
+    struct call_harness *h, bool pressed, bool muted, uint64_t now_ms) {
+  const enum havpe_gesture_event ev =
+      havpe_reset_gesture_step(&h->gesture, pressed, muted, now_ms);
+  iterate_kit_button_update(&h->button, pressed, now_ms);
+  const struct iterate_kit_session_poll poll = {
+    .press = iterate_kit_button_take_press(&h->button),
+    .end_press = havpe_reset_gesture_take_cancel_call(&h->gesture),
+    .wants_call = h->wants_call,
+    .call_active = h->call_active,
+  };
+  struct iterate_kit_session_actions actions;
+  iterate_kit_session_step(&h->session, &poll, &actions);
+  if (!muted && actions.start_call) {
+    h->wants_call = true;
+    h->call_active = true;
+  }
+  if (muted || actions.end_call) {
+    h->wants_call = false;
+    h->call_active = false;
+  }
+  return ev;
+}
+
+static void wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running(void) {
+  struct call_harness h;
+  memset(&h, 0, sizeof(h));
+
+  /* Boot released and arm button. */
+  assert(step_board_and_gesture(&h, false, false, 0U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, false, false, 40U) == HAVPE_GESTURE_NONE);
+
+  /* 1) Normal short tap (< 1.5 s) starts a call on down-edge and keeps it active. */
+  assert(step_board_and_gesture(&h, true, false, 100U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, true, false, 130U) == HAVPE_GESTURE_NONE);
+  assert(h.wants_call && h.call_active);
+  assert(step_board_and_gesture(&h, false, false, 300U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, false, false, 330U) == HAVPE_GESTURE_NONE);
+  assert(h.wants_call && h.call_active);
+
+  /* 2) Unmuted hold starting while ALREADY in a call: down-edge ends it at 30 ms,
+   *    and the 1.5 s end_press is a safe no-op that never starts a new call. */
+  assert(step_board_and_gesture(&h, true, false, 1000U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, true, false, 1030U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+  assert(step_board_and_gesture(&h, true, false, 2600U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+  assert(step_board_and_gesture(&h, false, false, 3000U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, false, false, 3030U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+
+  /* 3) Idle -> unmuted hold aborted at 3 s: down-edge starts call, 1.5 s cancels it,
+   *    releasing early leaves NO call running. */
+  assert(step_board_and_gesture(&h, true, false, 5000U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, true, false, 5030U) == HAVPE_GESTURE_NONE);
+  assert(h.wants_call && h.call_active);
+  assert(step_board_and_gesture(&h, true, false, 6530U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+  assert(step_board_and_gesture(&h, false, false, 8000U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, false, false, 8030U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+
+  /* 4) Idle -> full 5 s unmuted hold: call cancelled at 1.5 s, WIFI_RESET fires on
+   *    release with no call running. */
+  assert(step_board_and_gesture(&h, true, false, 10000U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, true, false, 10030U) == HAVPE_GESTURE_NONE);
+  assert(h.wants_call);
+  assert(step_board_and_gesture(&h, true, false, 11600U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+  assert(step_board_and_gesture(&h, true, false, 15200U) == HAVPE_GESTURE_NONE);
+  assert(!h.wants_call && !h.call_active);
+  assert(step_board_and_gesture(&h, false, false, 15300U) == HAVPE_GESTURE_NONE);
+  assert(step_board_and_gesture(&h, false, false, 15330U) == HAVPE_GESTURE_WIFI_RESET);
+  assert(!h.wants_call && !h.call_active);
+}
+
 int main(void) {
   ignores_boot_held_button_until_clean_release();
   unmuted_five_second_hold_resets_wifi_and_never_wipes();
   muted_tap_unlocks_and_ten_second_hold_full_wipes();
   renders_distinct_ring_patterns_for_modes_and_gestures();
+  wifi_reset_hold_cancels_opening_call_and_never_leaves_one_running();
   return 0;
 }

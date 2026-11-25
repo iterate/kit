@@ -246,9 +246,12 @@ iterate_kit_add_test(iterate-kit-pcm-format-test pcm_format_test.c
 iterate_kit_add_havpe_pure_test(iterate-kit-havpe-dial-test
   havpe_dial_test.c ../devices/havpe/havpe_dial.c)
 
-# HAVPE physical recovery gestures and mode ring renderers are pure C.
+# HAVPE physical recovery gestures and mode ring renderers are pure C; link core
+# so the test also proves how a Wi-Fi reset hold cancels calls through button +
+# session_grammar.
 iterate_kit_add_havpe_pure_test(iterate-kit-havpe-reset-gesture-test
-  havpe_reset_gesture_test.c ../devices/havpe/havpe_reset_gesture.c)
+  havpe_reset_gesture_test.c ../devices/havpe/havpe_reset_gesture.c
+  LINK iterate-kit-core)
 
 # StackChan's adopted pure DSP primitives (components/audio): the AEC cadence
 # bridge, reference scaler and near high-pass, each with the donor's host

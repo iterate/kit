@@ -117,11 +117,15 @@ bool iterate_kit_platform_clear_wifi_provisioning(void);
 bool iterate_kit_platform_wipe_provisioning(void);
 
 /**
- * Load the per-device 9-char setup code (`xxxx-xxxx`) from NVS (`kit_setup`),
- * or generate one with hardware entropy (`esp_fill_random`) on first boot and
- * persist it. Returns true if `out` holds a valid code.
+ * Load the per-device 14-char setup code (`xxxx-xxxx-xxxx`, 60 bits) from NVS
+ * (`kit_setup`), or generate one with `esp_fill_random()` on first boot and
+ * persist it.
+ *
+ * PRECONDITION: Wi-Fi/BT RF must already be started (or `bootloader_random`
+ * enabled) before calling this so `esp_fill_random()` draws from the hardware
+ * RNG noise source rather than an unseeded PRNG.
  */
-bool iterate_kit_platform_setup_code_load_or_create(char out[10]);
+bool iterate_kit_platform_setup_code_load_or_create(char out[15]);
 
 #ifdef __cplusplus
 }

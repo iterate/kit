@@ -145,6 +145,11 @@ static void poll(void *context, struct iterate_kit_voice_intent *out) {
   if (steps != 0) (void)iterate_kit_board_nudge_volume(steps * DIAL_VOLUME_STEP_PERCENT);
 }
 
+/** End any call opened by the down-edge once a centre-button hold enters Wi-Fi reset. */
+static void read_gestures(struct iterate_kit_board_gestures *out) {
+  if (havpe_portal_take_cancel_call()) out->end_press = true;
+}
+
 /* --- the XMOS pipeline, as something a person can move and then measure ---- */
 
 /*
@@ -277,6 +282,7 @@ static const struct iterate_kit_board board = {
   .ring = {.gpio = 21, .pixels = 12, .power_gpio = 45},
   .status_led_gpio = -1,
   .button = {.gpio = 0, .active_low = true},
+  .read_gestures = read_gestures,
   .wake_word = "jarvis",
   .sounds = {.wake = sound_chime_press, .wake_bytes = sizeof(sound_chime_press),
     .speech_peak = ITERATE_KIT_SPEECH_PEAK},

@@ -61,20 +61,19 @@ bool iterate_kit_device_hostname(
 }
 
 void iterate_kit_setup_code_format(
-    const uint8_t entropy[8], char out[ITERATE_KIT_SETUP_CODE_CAPACITY]) {
+    const uint8_t entropy[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES],
+    char out[ITERATE_KIT_SETUP_CODE_CAPACITY]) {
   if (out == NULL) return;
   if (entropy == NULL) {
     memset(out, 0, ITERATE_KIT_SETUP_CODE_CAPACITY);
     return;
   }
-  for (size_t index = 0U; index < 4U; ++index) {
-    out[index] = setup_alphabet[entropy[index] & 31U];
+  size_t dst = 0U;
+  for (size_t index = 0U; index < ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES; ++index) {
+    if (index == 4U || index == 8U) out[dst++] = '-';
+    out[dst++] = setup_alphabet[entropy[index] & 31U];
   }
-  out[4] = '-';
-  for (size_t index = 0U; index < 4U; ++index) {
-    out[5U + index] = setup_alphabet[entropy[4U + index] & 31U];
-  }
-  out[9] = '\0';
+  out[dst] = '\0';
 }
 
 static bool in_setup_alphabet(char c) {
@@ -85,23 +84,28 @@ static bool in_setup_alphabet(char c) {
 }
 
 bool iterate_kit_setup_code_valid(const char *code) {
-  if (code == NULL || strlen(code) != 9U || code[4] != '-') return false;
-  for (size_t index = 0U; index < 9U; ++index) {
-    if (index == 4U) continue;
+  if (code == NULL || strlen(code) != 14U || code[4] != '-' || code[9] != '-') {
+    return false;
+  }
+  for (size_t index = 0U; index < 14U; ++index) {
+    if (index == 4U || index == 9U) continue;
     if (!in_setup_alphabet(code[index])) return false;
   }
   return true;
 }
 
-static size_t normalize_code_chars(const char *input, char out[8]) {
+static size_t normalize_code_chars(
+    const char *input, char out[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES]) {
   size_t count = 0U;
-  memset(out, 0, 8U);
+  memset(out, 0, ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES);
   if (input == NULL) return 0U;
   for (const char *cursor = input; *cursor != '\0'; ++cursor) {
     char c = *cursor;
     if (c == '-' || c == ' ' || c == '\t') continue;
     if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    if (count >= 8U) return 9U;
+    if (count >= ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES) {
+      return ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES + 1U;
+    }
     out[count++] = c;
   }
   return count;
@@ -116,12 +120,14 @@ static bool constant_time_equal(const char *a, const char *b, size_t length) {
 }
 
 bool iterate_kit_setup_code_equal(const char *candidate, const char *expected) {
-  char norm_a[8];
-  char norm_b[8];
+  char norm_a[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES];
+  char norm_b[ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES];
   const size_t len_a = normalize_code_chars(candidate, norm_a);
   const size_t len_b = normalize_code_chars(expected, norm_b);
-  const bool chars_match = constant_time_equal(norm_a, norm_b, 8U);
-  return len_a == 8U && len_b == 8U && chars_match;
+  const bool chars_match =
+      constant_time_equal(norm_a, norm_b, ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES);
+  return len_a == ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES &&
+      len_b == ITERATE_KIT_SETUP_CODE_ENTROPY_BYTES && chars_match;
 }
 
 void iterate_kit_csrf_token_format(

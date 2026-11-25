@@ -121,13 +121,11 @@ static uint8_t read_saved_volume(void) {
   return kept;
 }
 
-static void init_identity(
+static void init_identity_base(
     enum iterate_kit_boot_mode mode,
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
   uint8_t mac[6] = {0};
-  uint8_t csrf_entropy[8];
-  char qr[ITERATE_KIT_WIFI_QR_CAPACITY];
 
   memset(&portal, 0, sizeof(portal));
   portal.lock = xSemaphoreCreateMutex();
@@ -139,13 +137,8 @@ static void init_identity(
   (void)esp_efuse_mac_get_default(mac);
   iterate_kit_device_short_id(mac, portal.short_id);
   (void)iterate_kit_device_hostname(portal.short_id, portal.hostname, sizeof(portal.hostname));
-  if (!iterate_kit_platform_setup_code_load_or_create(portal.setup_code)) {
-    ESP_LOGE(tag, "failed to load/create setup code");
-  }
-  esp_fill_random(csrf_entropy, sizeof(csrf_entropy));
-  iterate_kit_csrf_token_format(csrf_entropy, portal.csrf_token);
-  memset(csrf_entropy, 0, sizeof(csrf_entropy));
 
+  /* Guard initialized with empty secrets until Wi-Fi RF enables the HWRNG. */
   iterate_kit_portal_guard_init(
       &portal.guard,
       portal.short_id,
@@ -159,7 +152,48 @@ static void init_identity(
       portal.short_id,
       portal.hostname,
       esp_app_get_description()->version);
-  if (mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
+}
+
+/*
+ * HARDWARE RNG ENTROPY ORDERING.
+ *
+ * On ESP32-S3, `esp_random()` / `esp_fill_random()` return pseudo-random data
+ * unless a hardware noise source is active: either Wi-Fi/BT RF is started
+ * (`esp_wifi_start()`), or `bootloader_random_enable()` is active.
+ *
+ * We deliberately start Wi-Fi RF first rather than calling
+ * `bootloader_random_enable()`: on ESP32-S3 (`bootloader_random_esp32s3.c`),
+ * `bootloader_random_enable()` does not touch I2S (that conflict is original
+ * ESP32 only), but it reconfigures SAR ADC units 1 & 2 and `regi2c_saradc`,
+ * which must never overlap with Wi-Fi RF or any ADC user. Starting Wi-Fi RF
+ * first gives true RF noise to `esp_fill_random()` in all three boot modes
+ * without touching SAR ADC registers or audio peripherals.
+ *
+ * Therefore EVERY caller must invoke this function ONLY after `esp_wifi_start()`
+ * has succeeded (and before serving HTTP requests or beaconing the SoftAP).
+ */
+static void init_secrets_with_rf_active(void) {
+  uint8_t csrf_entropy[8];
+  char qr[ITERATE_KIT_WIFI_QR_CAPACITY];
+
+  if (!iterate_kit_platform_setup_code_load_or_create(portal.setup_code)) {
+    ESP_LOGE(tag, "failed to load/create setup code");
+  }
+  esp_fill_random(csrf_entropy, sizeof(csrf_entropy));
+  iterate_kit_csrf_token_format(csrf_entropy, portal.csrf_token);
+  memset(csrf_entropy, 0, sizeof(csrf_entropy));
+
+  /* Preserve any physical button unlock window granted before Wi-Fi got an IP. */
+  const uint64_t prior_unlock = portal.guard.unlocked_until_ms;
+  iterate_kit_portal_guard_init(
+      &portal.guard,
+      portal.short_id,
+      portal.setup_code,
+      portal.csrf_token,
+      portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP);
+  portal.guard.unlocked_until_ms = prior_unlock;
+
+  if (portal.mode == ITERATE_KIT_BOOT_MODE_SETUP_AP) {
     if (iterate_kit_wifi_qr_format(portal.hostname, portal.setup_code, qr, sizeof(qr))) {
       ESP_LOGI(tag, "setup_ap ssid=%s setup_code=%s", portal.hostname, portal.setup_code);
       ESP_LOGI(tag, "setup_qr %s", qr);
@@ -769,7 +803,7 @@ void havpe_portal_run_setup_ap(
     const struct iterate_kit_led_ring *ring_facts,
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
-  init_identity(ITERATE_KIT_BOOT_MODE_SETUP_AP, stored_cfg, stored_presence);
+  init_identity_base(ITERATE_KIT_BOOT_MODE_SETUP_AP, stored_cfg, stored_presence);
   (void)snprintf(portal.ip_address, sizeof(portal.ip_address), "192.168.4.1");
   (void)snprintf(portal.connection_state, sizeof(portal.connection_state), "setup");
   init_gpio_controls();
@@ -781,6 +815,21 @@ void havpe_portal_run_setup_ap(
   (void)esp_netif_create_default_wifi_sta();
 
   wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
+  (void)esp_wifi_init(&wifi_init);
+  (void)esp_event_handler_instance_register(
+      WIFI_EVENT, WIFI_EVENT_SCAN_DONE, setup_ap_wifi_event, NULL, NULL);
+  (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
+
+  /*
+   * Bring up Wi-Fi RF in STA-only mode first so `esp_fill_random()` draws true
+   * hardware RF entropy for the setup code and CSRF token WITHOUT beaconing an
+   * unconfigured SoftAP, then stop, configure WPA2 APSTA, and start the AP.
+   */
+  (void)esp_wifi_set_mode(WIFI_MODE_STA);
+  (void)esp_wifi_start();
+  init_secrets_with_rf_active();
+  (void)esp_wifi_stop();
+
   wifi_config_t ap_cfg = {0};
   (void)snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", portal.hostname);
   ap_cfg.ap.ssid_len = (uint8_t)strlen(portal.hostname);
@@ -791,10 +840,6 @@ void havpe_portal_run_setup_ap(
   ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
   ap_cfg.ap.pmf_cfg.required = false;
 
-  (void)esp_wifi_init(&wifi_init);
-  (void)esp_event_handler_instance_register(
-      WIFI_EVENT, WIFI_EVENT_SCAN_DONE, setup_ap_wifi_event, NULL, NULL);
-  (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
   (void)esp_wifi_set_mode(WIFI_MODE_APSTA);
   (void)esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
   (void)esp_wifi_start();
@@ -830,7 +875,7 @@ void havpe_portal_run_lan_unlinked(
     const struct iterate_kit_led_ring *ring_facts,
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
-  init_identity(ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, stored_cfg, stored_presence);
+  init_identity_base(ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, stored_cfg, stored_presence);
   (void)snprintf(portal.connection_state, sizeof(portal.connection_state), "wifi_connecting");
   init_gpio_controls();
   if (ring_facts != NULL) (void)iterate_kit_led_ring_start(ring_facts);
@@ -857,6 +902,9 @@ void havpe_portal_run_lan_unlinked(
   (void)esp_wifi_set_mode(WIFI_MODE_STA);
   (void)esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
   (void)esp_wifi_start();
+
+  /* Wi-Fi RF is now active, so setup code and CSRF token come from HWRNG. */
+  init_secrets_with_rf_active();
 
   start_mdns_once();
   (void)start_http_server();
@@ -891,8 +939,13 @@ void havpe_portal_run_lan_unlinked(
 void havpe_portal_prepare_normal(
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
-  init_identity(ITERATE_KIT_BOOT_MODE_NORMAL, stored_cfg, stored_presence);
+  /* Secrets are deferred until Wi-Fi STA is active in havpe_portal_poll_normal(). */
+  init_identity_base(ITERATE_KIT_BOOT_MODE_NORMAL, stored_cfg, stored_presence);
   (void)snprintf(portal.connection_state, sizeof(portal.connection_state), "wifi_connecting");
+}
+
+bool havpe_portal_take_cancel_call(void) {
+  return havpe_reset_gesture_take_cancel_call(&portal.gesture);
 }
 
 void havpe_portal_poll_normal(
@@ -955,6 +1008,11 @@ void havpe_portal_poll_normal(
 
   if (has_ip && !portal.lan_services_started) {
     portal.lan_services_started = true;
+    /* Wi-Fi STA is running and associated, so RF HWRNG entropy is active. */
+    if (xSemaphoreTake(portal.lock, pdMS_TO_TICKS(500)) == pdTRUE) {
+      init_secrets_with_rf_active();
+      xSemaphoreGive(portal.lock);
+    }
     start_mdns_once();
     (void)start_http_server();
   }
