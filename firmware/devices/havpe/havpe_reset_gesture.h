@@ -120,6 +120,14 @@ void havpe_ring_render_gesture(
     uint32_t now_ms,
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]);
 
+/**
+ * Render an unmistakable alternating red/amber fault ring when a Wi-Fi reset
+ * or full wipe erase/read-back verification fails (never shows success flashes).
+ */
+void havpe_ring_render_erase_error(
+    uint32_t now_ms,
+    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]);
+
 #ifdef __cplusplus
 }
 #endif

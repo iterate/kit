@@ -11,6 +11,67 @@ static int hex_value(char c) {
   return -1;
 }
 
+bool iterate_kit_web_action_allowed(
+    enum iterate_kit_boot_mode mode, enum iterate_kit_web_action action) {
+  switch (action) {
+    case ITERATE_KIT_WEB_ACTION_WIFI:
+    case ITERATE_KIT_WEB_ACTION_MIND:
+      /* Credentials (Wi-Fi password, OAuth refresh token, project API key) are
+       * accepted ONLY on the board's own WPA2-PSK SoftAP, never over plain-HTTP LAN. */
+      return mode == ITERATE_KIT_BOOT_MODE_SETUP_AP;
+    case ITERATE_KIT_WEB_ACTION_SETTINGS:
+    case ITERATE_KIT_WEB_ACTION_REBOOT:
+      return true;
+    case ITERATE_KIT_WEB_ACTION_ENTER_SETUP:
+    case ITERATE_KIT_WEB_ACTION_RESET_WIFI:
+      return mode != ITERATE_KIT_BOOT_MODE_SETUP_AP;
+  }
+  return false;
+}
+
+bool iterate_kit_web_cookie_get(
+    const char *cookie_header,
+    const char *name,
+    char *destination,
+    size_t capacity) {
+  size_t name_len;
+  const char *cursor;
+  if (destination != NULL && capacity > 0U) destination[0] = '\0';
+  if (cookie_header == NULL || name == NULL || name[0] == '\0' ||
+      destination == NULL || capacity == 0U) {
+    return false;
+  }
+  name_len = strlen(name);
+  cursor = cookie_header;
+  while (*cursor != '\0') {
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == ';') ++cursor;
+    if (*cursor == '\0') break;
+    const char *pair_start = cursor;
+    while (*cursor != '\0' && *cursor != ';') ++cursor;
+    const char *pair_end = cursor;
+    const char *eq = memchr(pair_start, '=', (size_t)(pair_end - pair_start));
+    if (eq != NULL) {
+      const size_t key_len = (size_t)(eq - pair_start);
+      if (key_len == name_len && memcmp(pair_start, name, name_len) == 0) {
+        const char *val_start = eq + 1;
+        const char *val_end = pair_end;
+        while (val_start < val_end && (*val_start == ' ' || *val_start == '\t')) {
+          ++val_start;
+        }
+        while (val_end > val_start && (val_end[-1] == ' ' || val_end[-1] == '\t')) {
+          --val_end;
+        }
+        const size_t val_len = (size_t)(val_end - val_start);
+        if (val_len >= capacity) return false;
+        memcpy(destination, val_start, val_len);
+        destination[val_len] = '\0';
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool iterate_kit_web_is_captive_probe(const char *path) {
   static const char *const probes[] = {
     "/hotspot-detect.html",
@@ -354,10 +415,15 @@ void iterate_kit_web_apply_mind_form(
   *presence = candidate_presence;
   memset(&candidate, 0, sizeof(candidate));
 
-  set_result(result, true, "Mind connection saved. Restarting to connect.");
+  if (presence->has_wifi) {
+    set_result(result, true, "Mind connection saved. Restarting to connect.");
+    result->reboot_needed = true;
+  } else {
+    set_result(result, true, "Mind connection saved. Now enter your 2.4 GHz Wi-Fi below to connect.");
+    result->reboot_needed = false;
+  }
   result->config_changed = true;
   result->clear_refresh_token = true;
-  result->reboot_needed = true;
 }
 
 void iterate_kit_web_apply_settings_form(
@@ -576,7 +642,7 @@ size_t iterate_kit_web_render_page(
   w_html(&w, status->hostname[0] ? status->hostname : "iterate");
   w_puts(&w, "</h1><p class=sub>");
   if (setup_ap) {
-    w_puts(&w, "Setup Mode &middot; Connect this voice puck to 2.4 GHz Wi-Fi");
+    w_puts(&w, "Encrypted Setup Mode (WPA2 SoftAP) &middot; Configure Wi-Fi and Mind");
   } else {
     w_html(&w, status->hostname);
     w_puts(&w, ".local &middot; Firmware ");
@@ -594,7 +660,7 @@ size_t iterate_kit_web_render_page(
   w_puts(&w, "<div class=card><h2>Status</h2>");
   w_puts(&w, "<div class=row><span class=k>Connection</span><span class=v>");
   if (status->key_refused) {
-    w_puts(&w, "Key refused (reconnect mind)");
+    w_puts(&w, "Key refused (reconnect mind in Setup Mode)");
   } else if (status->connection_state[0] != '\0') {
     w_html(&w, status->connection_state);
   } else {
@@ -605,7 +671,7 @@ size_t iterate_kit_web_render_page(
   w_puts(&w, "<div class=row><span class=k>Wi-Fi</span><span class=v>");
   if (presence->has_wifi) {
     w_html(&w, configuration->wifi_ssid);
-    w_puts(&w, status->wifi_connected ? " (connected)" : " (not connected)");
+    w_puts(&w, status->wifi_connected ? " (connected)" : " (saved)");
   } else {
     w_puts(&w, "Not configured");
   }
@@ -639,15 +705,27 @@ size_t iterate_kit_web_render_page(
   w_html(&w, status->firmware_version[0] ? status->firmware_version : "dev");
   w_puts(&w, "</span></div></div>");
 
-  /* --- LAN authorization banner / unlock form --- */
+  /* --- LAN authorization banner / per-browser unlock or physical claim --- */
   if (!setup_ap) {
     w_puts(&w, "<div class=card><h2>Changes</h2>");
     if (lan_unlocked) {
       w_printf(
           &w,
-          "<div class=\"msg ok\">Unlocked for %u s. You can save changes below.</div>",
+          "<div class=\"msg ok\">Unlocked in this browser for %u s. You can save changes below.</div>",
           (unsigned)status->unlocked_remaining_s);
     } else {
+      if (status->physical_claim_remaining_s > 0U) {
+        w_puts(&w,
+            "<form method=post action=/claim-unlock>"
+            "<input type=hidden name=csrf value=\"");
+        w_html(&w, csrf_token);
+        w_printf(
+            &w,
+            "\"><button type=submit>Claim physical unlock (%u s left)</button>"
+            "<p class=hint>Button tap detected on the puck. Claim now to unlock this browser for 3 minutes.</p>"
+            "</form>",
+            (unsigned)status->physical_claim_remaining_s);
+      }
       w_puts(&w,
           "<form method=post action=/unlock>"
           "<input type=hidden name=csrf value=\"");
@@ -655,85 +733,80 @@ size_t iterate_kit_web_render_page(
       w_puts(&w,
           "\"><label for=sc>Setup code</label>"
           "<input id=sc name=setup_code autocomplete=off placeholder=\"xxxx-xxxx-xxxx\" required>"
-          "<button type=submit>Unlock settings (3 min)</button>"
-          "<p class=hint>Find the code on the card, or slide the Mute switch ON and tap the centre button on the puck.</p>"
+          "<button type=submit>Unlock this browser (3 min)</button>"
+          "<p class=hint>Find the code on the card, or slide Mute ON, tap the centre button on the puck, and refresh to claim.</p>"
           "</form>");
     }
     w_puts(&w, "</div>");
   }
 
-  /* --- Wi-Fi card (primary on Setup AP, secondary on LAN) --- */
-  w_puts(&w, "<div class=card><h2>Wi-Fi (2.4 GHz)</h2>");
-  if (setup_ap && status->scan_results != NULL && status->scan_count > 0U) {
-    w_puts(&w, "<p class=hint>Tap a nearby network to fill its name:</p>");
-    for (size_t index = 0U; index < status->scan_count; ++index) {
-      const struct iterate_kit_wifi_scan_entry *ap = &status->scan_results[index];
-      w_puts(&w, "<button type=button class=ap data-ssid=\"");
-      w_html(&w, ap->ssid);
-      w_puts(&w, "\" onclick=\"document.getElementById('ssid').value=this.dataset.ssid\"><span>");
-      w_html(&w, ap->ssid);
-      w_printf(
-          &w, "</span><span>%d dBm%s</span></button>",
-          (int)ap->rssi, ap->open ? " open" : "");
-    }
-  }
-  w_puts(&w, "<form method=post action=/wifi><input type=hidden name=csrf value=\"");
-  w_html(&w, csrf_token);
-  w_puts(&w, "\"><label for=ssid>Network name (SSID)</label><input id=ssid name=ssid maxlength=32 required value=\"");
-  if (presence->has_wifi) w_html(&w, configuration->wifi_ssid);
-  w_puts(&w,
-      "\"><label for=pw>Password (leave empty for open Wi-Fi)</label>"
-      "<input id=pw name=password type=password maxlength=64 autocomplete=off>");
-  w_puts(&w, "<button type=submit>");
-  w_puts(&w, setup_ap ? "Save Wi-Fi &amp; Connect" : "Update Wi-Fi");
-  w_puts(&w, "</button>");
+  /* --- Credentials cards: rendered ONLY on the encrypted WPA2 SoftAP --- */
   if (setup_ap) {
+    w_puts(&w, "<div class=card><h2>Wi-Fi (2.4 GHz)</h2>");
+    if (status->scan_results != NULL && status->scan_count > 0U) {
+      w_puts(&w, "<p class=hint>Tap a nearby network to fill its name:</p>");
+      for (size_t index = 0U; index < status->scan_count; ++index) {
+        const struct iterate_kit_wifi_scan_entry *ap = &status->scan_results[index];
+        w_puts(&w, "<button type=button class=ap data-ssid=\"");
+        w_html(&w, ap->ssid);
+        w_puts(&w, "\" onclick=\"document.getElementById('ssid').value=this.dataset.ssid\"><span>");
+        w_html(&w, ap->ssid);
+        w_printf(
+            &w, "</span><span>%d dBm%s</span></button>",
+            (int)ap->rssi, ap->open ? " open" : "");
+      }
+    }
+    w_puts(&w, "<form method=post action=/wifi><input type=hidden name=csrf value=\"");
+    w_html(&w, csrf_token);
+    w_puts(&w, "\"><label for=ssid>Network name (SSID)</label><input id=ssid name=ssid maxlength=32 required value=\"");
+    if (presence->has_wifi) w_html(&w, configuration->wifi_ssid);
     w_puts(&w,
+        "\"><label for=pw>Password (leave empty for open Wi-Fi)</label>"
+        "<input id=pw name=password type=password maxlength=64 autocomplete=off>"
+        "<button type=submit>Save Wi-Fi &amp; Connect</button>"
         "<p class=hint>After connecting, open <b>http://");
     w_html(&w, status->hostname);
-    w_puts(&w, ".local/</b> from your phone on the same Wi-Fi to check status or link a mind.</p>");
-  }
-  w_puts(&w, "</form>");
-  if (setup_ap) {
-    w_puts(&w, "<form method=get action=/><button class=sec type=submit>Rescan networks</button></form>");
-  }
-  w_puts(&w, "</div>");
+    w_puts(&w, ".local/</b> from your phone on the same Wi-Fi to check status or adjust settings.</p>"
+        "</form>"
+        "<form method=get action=/><button class=sec type=submit>Rescan networks</button></form>"
+        "</div>");
 
-  /* --- Mind reconnect card --- */
-  if (setup_ap) {
-    w_puts(&w, "<details class=card><summary><b>Optional: Link an iterate Mind now</b></summary>");
-  } else {
-    w_puts(&w, "<div class=card><h2>Iterate Mind</h2>");
+    w_puts(&w, "<div class=card><h2>Iterate Mind</h2>"
+        "<form method=post action=/mind><input type=hidden name=csrf value=\"");
+    w_html(&w, csrf_token);
+    w_puts(&w,
+        "\"><input type=hidden name=mode value=mind>"
+        "<label for=mu>Mind address</label>"
+        "<input id=mu name=mind_url maxlength=128 required placeholder=\"example.com\" value=\"");
+    if (presence->has_platform) w_html(&w, configuration->os_base_url);
+    w_puts(&w,
+        "\"><label for=cid>OAuth client ID</label>"
+        "<input id=cid name=client_id maxlength=192 required placeholder=\"https://k.iterate.com/devices/...\" value=\"");
+    if (presence->has_platform &&
+        configuration->platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND) {
+      w_html(&w, configuration->oauth_client_id);
+    }
+    w_puts(&w,
+        "\"><label for=rt>OAuth refresh token</label>"
+        "<input id=rt name=refresh_token type=password maxlength=160 required autocomplete=off placeholder=\"");
+    w_puts(&w,
+        presence->has_platform &&
+                configuration->platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND
+            ? "Saved (hidden) — paste new token to replace"
+            : "user:grant:secret");
+    w_puts(&w,
+        "\"><button type=submit>Save Mind</button>"
+        "<p class=hint>Accepted only here over encrypted WPA2 SoftAP (never on plain-HTTP LAN). Stored secrets are never shown back.</p>"
+        "</form>");
+    if (presence->has_wifi) {
+      w_puts(&w, "<form method=post action=/reboot><input type=hidden name=csrf value=\"");
+      w_html(&w, csrf_token);
+      w_puts(&w, "\"><button class=sec type=submit>Exit Setup Mode &amp; Return to Wi-Fi</button></form>");
+    }
+    w_puts(&w, "</div>");
   }
-  w_puts(&w, "<form method=post action=/mind><input type=hidden name=csrf value=\"");
-  w_html(&w, csrf_token);
-  w_puts(&w,
-      "\"><input type=hidden name=mode value=mind>"
-      "<label for=mu>Mind address</label>"
-      "<input id=mu name=mind_url maxlength=128 required placeholder=\"example.com\" value=\"");
-  if (presence->has_platform) w_html(&w, configuration->os_base_url);
-  w_puts(&w,
-      "\"><label for=cid>OAuth client ID</label>"
-      "<input id=cid name=client_id maxlength=192 required placeholder=\"https://k.iterate.com/devices/...\" value=\"");
-  if (presence->has_platform &&
-      configuration->platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND) {
-    w_html(&w, configuration->oauth_client_id);
-  }
-  w_puts(&w,
-      "\"><label for=rt>OAuth refresh token</label>"
-      "<input id=rt name=refresh_token type=password maxlength=160 required autocomplete=off placeholder=\"");
-  w_puts(&w,
-      presence->has_platform &&
-              configuration->platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND
-          ? "Saved (hidden) — paste new token to replace"
-          : "user:grant:secret");
-  w_puts(&w,
-      "\"><button type=submit>Save Mind &amp; Reconnect</button>"
-      "<p class=hint>Stored secrets are never shown back. Replacing the token rotates away any prior grant.</p>"
-      "</form>");
-  w_puts(&w, setup_ap ? "</details>" : "</div>");
 
-  /* --- Basic settings card (Status voice + Volume) --- */
+  /* --- Basic settings card (non-secret: Status voice + Volume) --- */
   w_puts(&w, "<div class=card><h2>Settings</h2>"
       "<form method=post action=/settings><input type=hidden name=csrf value=\"");
   w_html(&w, csrf_token);
@@ -750,9 +823,16 @@ size_t iterate_kit_web_render_page(
       "<button type=submit>Save settings</button></form></div>",
       (unsigned)status->volume_percent, (unsigned)status->volume_percent);
 
-  /* --- Recovery actions on LAN --- */
+  /* --- LAN Mind/Wi-Fi transition & Recovery actions (no secret forms on LAN) --- */
   if (!setup_ap) {
-    w_puts(&w, "<div class=card><h2>Recovery</h2>"
+    w_puts(&w, "<div class=card><h2>Wi-Fi, Mind &amp; Recovery</h2>"
+        "<p class=hint>To keep Wi-Fi passwords and Mind refresh tokens off plain-HTTP LAN, connect or replace them in encrypted Setup Mode (WPA2 SoftAP <b>");
+    w_html(&w, status->hostname);
+    w_puts(&w, "</b>).</p>"
+        "<form method=post action=/enter-setup><input type=hidden name=csrf value=\"");
+    w_html(&w, csrf_token);
+    w_puts(&w,
+        "\"><button type=submit>Enter Setup Mode (link Mind or change Wi-Fi)</button></form>"
         "<form method=post action=/reset-wifi><input type=hidden name=csrf value=\"");
     w_html(&w, csrf_token);
     w_puts(&w,

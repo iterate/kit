@@ -81,8 +81,11 @@ bool iterate_kit_platform_refresh_token_store(
     const struct iterate_kit_configuration *configuration,
     const char *token);
 
-/** Erase any stored rotated refresh token from NVS (on mind change or full wipe). */
-void iterate_kit_platform_refresh_token_clear(void);
+/**
+ * Erase any stored rotated refresh token from NVS (on mind change or full wipe)
+ * and verify by read-back that both `token` and `seed` keys are absent.
+ */
+bool iterate_kit_platform_refresh_token_clear(void);
 
 /**
  * Read the `iterate_kit` partition allowing partial configurations (Wi-Fi-only

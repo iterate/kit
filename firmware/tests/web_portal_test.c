@@ -3,6 +3,46 @@
 #include <assert.h>
 #include <string.h>
 
+static void parses_cookies_and_enforces_mode_credential_policy(void) {
+  char val[64];
+  assert(iterate_kit_web_cookie_get("kit_sid=abc123", "kit_sid", val, sizeof(val)));
+  assert(strcmp(val, "abc123") == 0);
+  assert(iterate_kit_web_cookie_get(
+      "other=1; kit_sid=0123456789abcdef; theme=dark", "kit_sid", val, sizeof(val)));
+  assert(strcmp(val, "0123456789abcdef") == 0);
+  assert(!iterate_kit_web_cookie_get("not_kit_sid=1; x=2", "kit_sid", val, sizeof(val)));
+  assert(val[0] == '\0');
+  assert(!iterate_kit_web_cookie_get("kit_sid=toolongvalue", "kit_sid", val, 5U));
+
+  /* Credentials (WIFI and MIND) are allowed ONLY in encrypted SETUP_AP mode. */
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_WIFI));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_MIND));
+  assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_WIFI));
+  assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_MIND));
+  assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_WIFI));
+  assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_MIND));
+
+  /* Non-secret settings and recovery transitions stay allowed on LAN. */
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_SETTINGS));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_ENTER_SETUP));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_RESET_WIFI));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_NORMAL, ITERATE_KIT_WEB_ACTION_REBOOT));
+  assert(iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, ITERATE_KIT_WEB_ACTION_ENTER_SETUP));
+  assert(!iterate_kit_web_action_allowed(
+      ITERATE_KIT_BOOT_MODE_SETUP_AP, ITERATE_KIT_WEB_ACTION_ENTER_SETUP));
+}
+
 static void detects_captive_probes_and_decodes_forms(void) {
   char out[64];
   assert(iterate_kit_web_is_captive_probe("/hotspot-detect.html"));
@@ -45,6 +85,18 @@ static void applies_wifi_mind_and_settings_forms_safely(void) {
   memset(&cfg, 0, sizeof(cfg));
   memset(&presence, 0, sizeof(presence));
 
+  /* Saving Mind before Wi-Fi stays in Setup AP (reboot_needed == false). */
+  const char *mind_form =
+      "mode=mind&mind_url=example.family"
+      "&client_id=https%3A%2F%2Fk.iterate.com%2Fdevices%2Fhavpe%2Fclients%2F1.json"
+      "&refresh_token=usr_1%3Agrt_1%3Asecret_tok_99";
+  iterate_kit_web_apply_mind_form(mind_form, strlen(mind_form), &cfg, &presence, &res);
+  assert(res.ok && res.config_changed && res.clear_refresh_token && !res.reboot_needed);
+  assert(presence.has_platform && cfg.platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND);
+  assert(strcmp(cfg.os_base_url, "https://iterate.example.family") == 0);
+  assert(strcmp(cfg.oauth_client_id, "https://k.iterate.com/devices/havpe/clients/1.json") == 0);
+  assert(strcmp(cfg.oauth_refresh_token, "usr_1:grt_1:secret_tok_99") == 0);
+
   /* Short WPA password rejected without mutating config. */
   const char *bad_wifi = "ssid=LabNet&password=short";
   iterate_kit_web_apply_wifi_form(bad_wifi, strlen(bad_wifi), &cfg, &presence, &res);
@@ -57,22 +109,14 @@ static void applies_wifi_mind_and_settings_forms_safely(void) {
   assert(strcmp(cfg.wifi_ssid, "LabNet") == 0);
   assert(strcmp(cfg.wifi_password, "correct horse battery") == 0);
 
+  /* Saving Mind when Wi-Fi IS already saved triggers reboot back to Wi-Fi. */
+  iterate_kit_web_apply_mind_form(mind_form, strlen(mind_form), &cfg, &presence, &res);
+  assert(res.ok && res.config_changed && res.clear_refresh_token && res.reboot_needed);
+
   /* Open network allowed. */
   const char *open_wifi = "ssid=GuestNet&password=";
   iterate_kit_web_apply_wifi_form(open_wifi, strlen(open_wifi), &cfg, &presence, &res);
   assert(res.ok && strcmp(cfg.wifi_ssid, "GuestNet") == 0 && cfg.wifi_password[0] == '\0');
-
-  /* Mind form normalizes bare domain and sets clear_refresh_token. */
-  const char *mind_form =
-      "mode=mind&mind_url=example.family"
-      "&client_id=https%3A%2F%2Fk.iterate.com%2Fdevices%2Fhavpe%2Fclients%2F1.json"
-      "&refresh_token=usr_1%3Agrt_1%3Asecret_tok_99";
-  iterate_kit_web_apply_mind_form(mind_form, strlen(mind_form), &cfg, &presence, &res);
-  assert(res.ok && res.config_changed && res.clear_refresh_token && res.reboot_needed);
-  assert(presence.has_platform && cfg.platform == ITERATE_KIT_CONFIGURATION_PLATFORM_MIND);
-  assert(strcmp(cfg.os_base_url, "https://iterate.example.family") == 0);
-  assert(strcmp(cfg.oauth_client_id, "https://k.iterate.com/devices/havpe/clients/1.json") == 0);
-  assert(strcmp(cfg.oauth_refresh_token, "usr_1:grt_1:secret_tok_99") == 0);
 
   /* Invalid mind update leaves existing valid mind intact. */
   const char *bad_mind = "mode=mind&mind_url=bad&client_id=ftp://x&refresh_token=abc";
@@ -97,7 +141,7 @@ static void applies_wifi_mind_and_settings_forms_safely(void) {
   assert(!res.ok);
 }
 
-static void rendered_html_and_json_never_leak_secrets_and_escape_xss(void) {
+static void rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_lan(void) {
   struct iterate_kit_configuration cfg;
   struct iterate_kit_configuration_presence presence = {true, true, true};
   struct iterate_kit_portal_status status;
@@ -127,14 +171,22 @@ static void rendered_html_and_json_never_leak_secrets_and_escape_xss(void) {
   status.wifi_rssi = -58;
   memcpy(status.connection_state, "ready", sizeof("ready"));
   status.volume_percent = 75U;
+  status.physical_claim_remaining_s = 25U;
 
   const size_t html_len = iterate_kit_web_render_page(
-      &cfg, &presence, &status, "0123456789abcdef", html, sizeof(html));
+      &cfg, &presence, &status, "0123456789abcdef0123456789abcdef", html, sizeof(html));
   assert(html_len > 500U);
   assert(strstr(html, "iterate-a1b2.local") != NULL);
   assert(strstr(html, "-58 dBm (Good)") != NULL);
   assert(strstr(html, "003114-2026-11-25-abcdef0") != NULL);
   assert(strstr(html, "https://iterate.example.com") != NULL);
+  /* Physical claim button shown when armed; LAN has Enter Setup Mode instead of secret inputs. */
+  assert(strstr(html, "action=/claim-unlock") != NULL);
+  assert(strstr(html, "action=/enter-setup") != NULL);
+  assert(strstr(html, "action=/mind") == NULL);
+  assert(strstr(html, "action=/wifi") == NULL);
+  assert(strstr(html, "name=refresh_token") == NULL);
+  assert(strstr(html, "name=password") == NULL);
   /* XSS escaped. */
   assert(strstr(html, "<b>Evil") == NULL);
   assert(strstr(html, "&lt;b&gt;Evil&quot;Net&lt;/b&gt;") != NULL);
@@ -150,9 +202,9 @@ static void rendered_html_and_json_never_leak_secrets_and_escape_xss(void) {
   assert(strstr(json, "\"connectionState\":\"ready\"") != NULL);
   assert(strstr(json, "SUPER_SECRET_WIFI_PASS_123") == NULL);
   assert(strstr(json, "NEVER_SHOW_THIS_TOKEN") == NULL);
-  assert(strstr(json, "0123456789abcdef") == NULL);
+  assert(strstr(json, "0123456789abcdef0123456789abcdef") == NULL);
 
-  /* Setup AP page renders scanned networks. */
+  /* Setup AP page renders scanned networks AND both Wi-Fi and Mind forms (over WPA2). */
   memset(&scans, 0, sizeof(scans));
   memcpy(scans[0].ssid, "CoffeeShop", sizeof("CoffeeShop"));
   scans[0].rssi = -62;
@@ -161,16 +213,21 @@ static void rendered_html_and_json_never_leak_secrets_and_escape_xss(void) {
   status.scan_results = scans;
   status.scan_count = 1U;
   const size_t ap_len = iterate_kit_web_render_page(
-      &cfg, &presence, &status, "0123456789abcdef", html, sizeof(html));
+      &cfg, &presence, &status, "0123456789abcdef0123456789abcdef", html, sizeof(html));
   assert(ap_len > 500U);
   assert(strstr(html, "CoffeeShop") != NULL);
-  assert(strstr(html, "Save Wi-Fi") != NULL);
+  assert(strstr(html, "action=/wifi") != NULL);
+  assert(strstr(html, "action=/mind") != NULL);
+  assert(strstr(html, "name=refresh_token") != NULL);
+  assert(strstr(html, "Exit Setup Mode") != NULL);
   assert(strstr(html, "SUPER_SECRET_WIFI_PASS_123") == NULL);
+  assert(strstr(html, "NEVER_SHOW_THIS_TOKEN") == NULL);
 }
 
 int main(void) {
+  parses_cookies_and_enforces_mode_credential_policy();
   detects_captive_probes_and_decodes_forms();
   applies_wifi_mind_and_settings_forms_safely();
-  rendered_html_and_json_never_leak_secrets_and_escape_xss();
+  rendered_html_and_json_never_leak_secrets_and_keep_credentials_off_lan();
   return 0;
 }

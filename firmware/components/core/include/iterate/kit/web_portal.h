@@ -36,6 +36,7 @@ struct iterate_kit_portal_status {
   bool key_refused;
   uint8_t volume_percent;
   uint32_t unlocked_remaining_s;
+  uint32_t physical_claim_remaining_s;
   const struct iterate_kit_wifi_scan_entry *scan_results;
   size_t scan_count;
   const char *banner_message;
@@ -49,6 +50,15 @@ enum iterate_kit_web_field_status {
   ITERATE_KIT_WEB_FIELD_INVALID,
 };
 
+enum iterate_kit_web_action {
+  ITERATE_KIT_WEB_ACTION_WIFI = 0,
+  ITERATE_KIT_WEB_ACTION_MIND,
+  ITERATE_KIT_WEB_ACTION_SETTINGS,
+  ITERATE_KIT_WEB_ACTION_ENTER_SETUP,
+  ITERATE_KIT_WEB_ACTION_RESET_WIFI,
+  ITERATE_KIT_WEB_ACTION_REBOOT,
+};
+
 struct iterate_kit_portal_action_result {
   bool ok;
   bool config_changed;
@@ -58,6 +68,29 @@ struct iterate_kit_portal_action_result {
   bool reboot_needed;
   char message[ITERATE_KIT_WEB_MESSAGE_CAPACITY];
 };
+
+/**
+ * Policy enforcing which mutating actions are permitted in each boot mode:
+ * - WIFI and MIND (which carry a Wi-Fi password or OAuth refresh token / API
+ *   key) are permitted ONLY in SETUP_AP over the board's WPA2-PSK SoftAP and
+ *   NEVER over plain-HTTP LAN.
+ * - SETTINGS (non-secret status voice and speaker volume) and REBOOT are
+ *   permitted in all modes.
+ * - ENTER_SETUP and RESET_WIFI are permitted on LAN modes to transition back
+ *   to encrypted Setup Mode.
+ */
+bool iterate_kit_web_action_allowed(
+    enum iterate_kit_boot_mode mode, enum iterate_kit_web_action action);
+
+/**
+ * Extract one cookie value by exact `name` from an HTTP `Cookie` request header.
+ * Returns true if found and fits in `destination`; clears `destination` otherwise.
+ */
+bool iterate_kit_web_cookie_get(
+    const char *cookie_header,
+    const char *name,
+    char *destination,
+    size_t capacity);
 
 /**
  * True when `path` is a known OS captive-portal connectivity probe
@@ -94,7 +127,8 @@ void iterate_kit_web_apply_wifi_form(
  * Validates and applies a Mind reconnect form (`mind_url`, `client_id`,
  * `refresh_token`) or legacy Project form (`mode=project`, `project_url`,
  * `project_id`, `project_api_key`). On error leaves `configuration` and
- * `presence` untouched.
+ * `presence` untouched. Requests reboot only when Wi-Fi is already stored;
+ * otherwise stays in Setup AP so the user can submit Wi-Fi next in one visit.
  */
 void iterate_kit_web_apply_mind_form(
     const char *body,
@@ -117,7 +151,8 @@ void iterate_kit_web_apply_settings_form(
 /**
  * Renders the single-page mobile-friendly HTML UI (both Setup AP and LAN
  * modes). Never emits stored secrets (Wi-Fi password, refresh token, API key,
- * or setup code). Returns bytes written (excluding NUL), or 0 on overflow.
+ * or setup code). In LAN modes, never renders password or refresh-token forms.
+ * Returns bytes written (excluding NUL), or 0 on overflow.
  */
 size_t iterate_kit_web_render_page(
     const struct iterate_kit_configuration *configuration,

@@ -261,3 +261,17 @@ void havpe_ring_render_gesture(
     }
   }
 }
+
+void havpe_ring_render_erase_error(
+    uint32_t now_ms,
+    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]) {
+  if (pixels == NULL) return;
+  const uint8_t phase = (uint8_t)((now_ms / 250U) & 1U);
+  for (uint8_t i = 0U; i < ITERATE_KIT_CONVERSATION_LIGHT_COUNT; ++i) {
+    if (((i + phase) & 1U) == 0U) {
+      pixels[i] = (struct iterate_kit_rgb8){48U, 0U, 0U};
+    } else {
+      pixels[i] = (struct iterate_kit_rgb8){40U, 18U, 0U};
+    }
+  }
+}

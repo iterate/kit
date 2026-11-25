@@ -197,12 +197,70 @@ bool iterate_kit_platform_refresh_token_store(
   return stored;
 }
 
-void iterate_kit_platform_refresh_token_clear(void) {
+bool iterate_kit_platform_refresh_token_clear(void) {
   nvs_handle_t handle;
-  if (nvs_open(token_namespace, NVS_READWRITE, &handle) != ESP_OK) return;
-  (void)nvs_erase_all(handle);
-  (void)nvs_commit(handle);
+  esp_err_t err = nvs_open(token_namespace, NVS_READWRITE, &handle);
+  if (err == ESP_OK) {
+    const bool erased =
+        nvs_erase_all(handle) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+    if (!erased) return false;
+  } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+    return false;
+  }
+
+  /* Verify by read-back that no rotated token or seed digest remains in NVS. */
+  err = nvs_open(token_namespace, NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return true;
+  if (err != ESP_OK) return false;
+  size_t size = 0U;
+  const esp_err_t tok_err = nvs_get_str(handle, "token", NULL, &size);
+  size = 0U;
+  const esp_err_t seed_err = nvs_get_str(handle, "seed", NULL, &size);
   nvs_close(handle);
+  return tok_err == ESP_ERR_NVS_NOT_FOUND && seed_err == ESP_ERR_NVS_NOT_FOUND;
+}
+
+static bool verify_partition_erased(const esp_partition_t *partition) {
+  uint8_t chunk[256];
+  if (partition == NULL || partition->size == 0U) return false;
+  for (size_t offset = 0U; offset < partition->size; offset += sizeof(chunk)) {
+    const size_t remaining = partition->size - offset;
+    const size_t len = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+    if (esp_partition_read(partition, offset, chunk, len) != ESP_OK) {
+      return false;
+    }
+    for (size_t i = 0U; i < len; ++i) {
+      if (chunk[i] != 0xffU) return false;
+    }
+  }
+  return true;
+}
+
+static bool clear_and_verify_nvs_volume(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open("kit", NVS_READWRITE, &handle);
+  if (err == ESP_OK) {
+    const esp_err_t erase_err = nvs_erase_key(handle, "volume");
+    bool ok = true;
+    if (erase_err == ESP_OK) {
+      ok = nvs_commit(handle) == ESP_OK;
+    } else if (erase_err != ESP_ERR_NVS_NOT_FOUND) {
+      ok = false;
+    }
+    nvs_close(handle);
+    if (!ok) return false;
+  } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+    return false;
+  }
+
+  err = nvs_open("kit", NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return true;
+  if (err != ESP_OK) return false;
+  uint8_t kept = 0U;
+  const esp_err_t get_err = nvs_get_u8(handle, "volume", &kept);
+  nvs_close(handle);
+  return get_err == ESP_ERR_NVS_NOT_FOUND;
 }
 
 struct iterate_kit_platform_provisioning_result
@@ -304,13 +362,14 @@ bool iterate_kit_platform_clear_wifi_provisioning(void) {
   const struct iterate_kit_platform_provisioning_result loaded =
       iterate_kit_platform_read_stored_provisioning(&cfg, &presence);
   if (loaded.status != ITERATE_KIT_PLATFORM_PROVISIONING_OK) {
-    /* Already unprovisioned or corrupt: erase only the partition. */
+    /* Already unprovisioned or corrupt: erase the partition and verify all 0xFF. */
     const esp_partition_t *partition = esp_partition_find_first(
         (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
         (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
         iterate_kit_partition_label);
     return partition != NULL &&
-        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK;
+        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK &&
+        verify_partition_erased(partition);
   }
   iterate_kit_configuration_clear_wifi(&cfg, &presence);
   if (!presence.has_platform && !presence.has_status_voice) {
@@ -320,11 +379,24 @@ bool iterate_kit_platform_clear_wifi_provisioning(void) {
         iterate_kit_partition_label);
     memset(&cfg, 0, sizeof(cfg));
     return partition != NULL &&
-        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK;
+        esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK &&
+        verify_partition_erased(partition);
   }
-  const bool ok = iterate_kit_platform_write_provisioning(&cfg, &presence);
+  const bool wrote = iterate_kit_platform_write_provisioning(&cfg, &presence);
   memset(&cfg, 0, sizeof(cfg));
-  return ok;
+  if (!wrote) return false;
+
+  /* Read back to confirm Wi-Fi SSID and password are gone from flash. */
+  struct iterate_kit_configuration verify_cfg;
+  struct iterate_kit_configuration_presence verify_presence;
+  const struct iterate_kit_platform_provisioning_result readback =
+      iterate_kit_platform_read_stored_provisioning(&verify_cfg, &verify_presence);
+  const bool cleared = readback.status == ITERATE_KIT_PLATFORM_PROVISIONING_OK &&
+      !verify_presence.has_wifi &&
+      verify_cfg.wifi_ssid[0] == '\0' &&
+      verify_cfg.wifi_password[0] == '\0';
+  memset(&verify_cfg, 0, sizeof(verify_cfg));
+  return cleared;
 }
 
 bool iterate_kit_platform_wipe_provisioning(void) {
@@ -332,15 +404,12 @@ bool iterate_kit_platform_wipe_provisioning(void) {
       (esp_partition_type_t)ITERATE_KIT_PARTITION_TYPE,
       (esp_partition_subtype_t)ITERATE_KIT_PARTITION_SUBTYPE,
       iterate_kit_partition_label);
-  nvs_handle_t handle;
-  iterate_kit_platform_refresh_token_clear();
-  if (nvs_open("kit", NVS_READWRITE, &handle) == ESP_OK) {
-    (void)nvs_erase_key(handle, "volume");
-    (void)nvs_commit(handle);
-    nvs_close(handle);
-  }
-  return partition != NULL &&
-      esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK;
+  const bool token_ok = iterate_kit_platform_refresh_token_clear();
+  const bool volume_ok = clear_and_verify_nvs_volume();
+  const bool partition_ok = partition != NULL &&
+      esp_partition_erase_range(partition, 0U, partition->size) == ESP_OK &&
+      verify_partition_erased(partition);
+  return token_ok && volume_ok && partition_ok;
 }
 
 static const char setup_namespace[] = "kit_setup";

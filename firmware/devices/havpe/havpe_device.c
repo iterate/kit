@@ -303,6 +303,11 @@ void app_main(void) {
   struct iterate_kit_configuration_presence presence;
   (void)iterate_kit_platform_read_stored_provisioning(&stored_cfg, &presence);
 
+  if (havpe_portal_consume_setup_ap_request()) {
+    havpe_portal_run_setup_ap(&board.ring, &stored_cfg, &presence);
+    return;
+  }
+
   switch (iterate_kit_provisioning_boot_mode(&presence)) {
     case ITERATE_KIT_BOOT_MODE_SETUP_AP:
       havpe_portal_run_setup_ap(&board.ring, &stored_cfg, &presence);

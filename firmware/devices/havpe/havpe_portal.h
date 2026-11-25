@@ -13,6 +13,14 @@ extern "C" {
 #endif
 
 /**
+ * Consume the one-boot RTC flag set by `POST /enter-setup` on the LAN page so
+ * the board boots once into encrypted Setup Mode (WPA2 SoftAP) while keeping
+ * its saved Wi-Fi and Mind credentials intact. Returns true only after a
+ * software restart that explicitly armed the flag.
+ */
+bool havpe_portal_consume_setup_ap_request(void);
+
+/**
  * Run HAVPE Setup Mode (WPA2 SoftAP `iterate-<id>`, captive DNS on UDP/53,
  * captive portal HTTP server on TCP/80, rotating cyan LED ring, and physical
  * recovery gestures). Never returns: reboots once Wi-Fi credentials are saved

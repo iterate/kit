@@ -1,5 +1,6 @@
 #include "iterate/kit/captive_dns.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 enum {

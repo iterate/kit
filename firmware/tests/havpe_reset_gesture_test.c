@@ -123,6 +123,14 @@ static void renders_distinct_ring_patterns_for_modes_and_gestures(void) {
   /* Wi-Fi reset is cyan; full wipe is red. */
   assert(wifi_arm[0].red == 0U && wifi_arm[0].blue > 20U);
   assert(wipe_arm[0].red > 20U && wipe_arm[0].blue == 0U);
+
+  /* Erase failure ring alternates red and amber and flips phase over time. */
+  struct iterate_kit_rgb8 err0[12], err1[12];
+  havpe_ring_render_erase_error(0U, err0);
+  havpe_ring_render_erase_error(250U, err1);
+  assert(err0[0].red > 30U && err0[0].green == 0U);
+  assert(err0[1].red > 30U && err0[1].green > 10U);
+  assert(memcmp(err0, err1, sizeof(err0)) != 0);
 }
 
 /*
