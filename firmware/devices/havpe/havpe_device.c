@@ -301,14 +301,26 @@ void app_main(void) {
 
   struct iterate_kit_configuration stored_cfg;
   struct iterate_kit_configuration_presence presence;
-  (void)iterate_kit_platform_read_stored_provisioning(&stored_cfg, &presence);
+  const struct iterate_kit_platform_provisioning_result stored =
+      iterate_kit_platform_read_stored_provisioning(&stored_cfg, &presence);
 
-  if (havpe_portal_consume_setup_ap_request()) {
-    havpe_portal_run_setup_ap(&board.ring, &stored_cfg, &presence);
-    return;
+  if (stored.status != ITERATE_KIT_PLATFORM_PROVISIONING_OK) {
+    ESP_LOGW(
+        tag,
+        "device is not provisioned: storage=%s — entering Setup Mode",
+        iterate_kit_platform_provisioning_status_name(stored.status));
+  } else if (!presence.has_wifi) {
+    ESP_LOGW(tag, "Wi-Fi is not configured (mind preserved) — entering Setup Mode");
+  } else if (!presence.has_platform) {
+    ESP_LOGI(tag, "Wi-Fi configured, mind not linked — entering LAN awaiting-mind mode");
   }
 
-  switch (iterate_kit_provisioning_boot_mode(&presence)) {
+  const bool setup_once = havpe_portal_consume_setup_ap_request();
+  if (setup_once) {
+    ESP_LOGI(tag, "one-boot Setup Mode requested by physical gesture — keeping saved credentials");
+  }
+
+  switch (iterate_kit_provisioning_select_boot_mode(&presence, setup_once)) {
     case ITERATE_KIT_BOOT_MODE_SETUP_AP:
       havpe_portal_run_setup_ap(&board.ring, &stored_cfg, &presence);
       return;

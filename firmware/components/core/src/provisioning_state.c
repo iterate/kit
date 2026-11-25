@@ -18,6 +18,23 @@ enum iterate_kit_boot_mode iterate_kit_provisioning_boot_mode(
   return ITERATE_KIT_BOOT_MODE_NORMAL;
 }
 
+bool iterate_kit_setup_once_rtc_valid(
+    bool is_software_reset,
+    uint64_t magic,
+    uint64_t inv_magic,
+    uint64_t expected_magic) {
+  return is_software_reset && magic == expected_magic && inv_magic == ~expected_magic;
+}
+
+enum iterate_kit_boot_mode iterate_kit_provisioning_select_boot_mode(
+    const struct iterate_kit_configuration_presence *presence,
+    bool setup_ap_once_requested) {
+  if (setup_ap_once_requested) {
+    return ITERATE_KIT_BOOT_MODE_SETUP_AP;
+  }
+  return iterate_kit_provisioning_boot_mode(presence);
+}
+
 const char *iterate_kit_boot_mode_name(enum iterate_kit_boot_mode mode) {
   switch (mode) {
     case ITERATE_KIT_BOOT_MODE_SETUP_AP:

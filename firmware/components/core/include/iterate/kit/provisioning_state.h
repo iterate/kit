@@ -132,6 +132,25 @@ struct iterate_kit_portal_guard {
 enum iterate_kit_boot_mode iterate_kit_provisioning_boot_mode(
     const struct iterate_kit_configuration_presence *presence);
 
+/**
+ * Validate a one-boot RTC flag requesting Setup Mode without erasing saved
+ * credentials. Returns true ONLY after a software reset when both `magic` and
+ * its bitwise inverse match the expected sentinel.
+ */
+bool iterate_kit_setup_once_rtc_valid(
+    bool is_software_reset,
+    uint64_t magic,
+    uint64_t inv_magic,
+    uint64_t expected_magic);
+
+/**
+ * Select the boot mode taking both stored configuration presence and an
+ * optional validated one-boot Setup Mode request into account.
+ */
+enum iterate_kit_boot_mode iterate_kit_provisioning_select_boot_mode(
+    const struct iterate_kit_configuration_presence *presence,
+    bool setup_ap_once_requested);
+
 const char *iterate_kit_boot_mode_name(enum iterate_kit_boot_mode mode);
 
 const char *iterate_kit_claim_color_name(enum iterate_kit_claim_color color);

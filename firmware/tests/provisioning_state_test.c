@@ -26,6 +26,15 @@ static void selects_boot_mode_from_configuration_presence(void) {
   /* Both Wi-Fi and mind enters Normal mode. */
   p.has_platform = true;
   assert(iterate_kit_provisioning_boot_mode(&p) == ITERATE_KIT_BOOT_MODE_NORMAL);
+
+  /* One-boot RTC Setup Mode flag overrides Normal mode only on valid SW reset sentinel. */
+  const uint64_t magic = UINT64_C(0x4954455253455455);
+  assert(!iterate_kit_setup_once_rtc_valid(false, magic, ~magic, magic));
+  assert(!iterate_kit_setup_once_rtc_valid(true, magic, magic, magic));
+  assert(!iterate_kit_setup_once_rtc_valid(true, 0U, ~UINT64_C(0), magic));
+  assert(iterate_kit_setup_once_rtc_valid(true, magic, ~magic, magic));
+  assert(iterate_kit_provisioning_select_boot_mode(&p, false) == ITERATE_KIT_BOOT_MODE_NORMAL);
+  assert(iterate_kit_provisioning_select_boot_mode(&p, true) == ITERATE_KIT_BOOT_MODE_SETUP_AP);
 }
 
 static void derives_identity_setup_code_and_qr(void) {

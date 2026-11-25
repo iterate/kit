@@ -119,9 +119,8 @@ bool havpe_portal_consume_setup_ap_request(void) {
   const uint64_t inv_magic = setup_once_rtc.inv_magic;
   setup_once_rtc.magic = 0U;
   setup_once_rtc.inv_magic = 0U;
-  return esp_reset_reason() == ESP_RST_SW &&
-      magic == SETUP_ONCE_MAGIC &&
-      inv_magic == ~SETUP_ONCE_MAGIC;
+  return iterate_kit_setup_once_rtc_valid(
+      esp_reset_reason() == ESP_RST_SW, magic, inv_magic, SETUP_ONCE_MAGIC);
 }
 
 static uint64_t monotonic_ms(void) {
@@ -1225,6 +1224,7 @@ void havpe_portal_run_setup_ap(
     const struct iterate_kit_led_ring *ring_facts,
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
+  bool radio_fault = false;
   init_identity_base(ITERATE_KIT_BOOT_MODE_SETUP_AP, stored_cfg, stored_presence);
   (void)snprintf(portal.ip_address, sizeof(portal.ip_address), "192.168.4.1");
   (void)snprintf(portal.connection_state, sizeof(portal.connection_state), "setup");
@@ -1237,47 +1237,59 @@ void havpe_portal_run_setup_ap(
   (void)esp_netif_create_default_wifi_sta();
 
   wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
-  (void)esp_wifi_init(&wifi_init);
-  (void)esp_event_handler_instance_register(
-      WIFI_EVENT, WIFI_EVENT_SCAN_DONE, setup_ap_wifi_event, NULL, NULL);
-  (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
-
-  /*
-   * Bring up Wi-Fi RF in STA-only mode first so `esp_fill_random()` draws true
-   * hardware RF entropy for the setup code WITHOUT beaconing an unconfigured
-   * SoftAP, then stop, configure WPA2 APSTA, and start the AP.
-   */
-  (void)esp_wifi_set_mode(WIFI_MODE_STA);
-  if (esp_wifi_start() == ESP_OK) {
+  esp_err_t wifi_err = esp_wifi_init(&wifi_init);
+  if (wifi_err == ESP_OK) {
+    (void)esp_event_handler_instance_register(
+        WIFI_EVENT, WIFI_EVENT_SCAN_DONE, setup_ap_wifi_event, NULL, NULL);
+    (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    /*
+     * Bring up Wi-Fi RF in STA-only mode first so `esp_fill_random()` draws true
+     * hardware RF entropy for the setup code WITHOUT beaconing an unconfigured
+     * SoftAP, then stop, configure WPA2 APSTA, and start the AP.
+     */
+    wifi_err = esp_wifi_set_mode(WIFI_MODE_STA);
+  }
+  if (wifi_err == ESP_OK) {
+    wifi_err = esp_wifi_start();
+  }
+  if (wifi_err == ESP_OK) {
     portal.rf_entropy_ready = true;
     init_setup_ap_passphrase_with_rf_active();
     portal.rf_entropy_ready = false;
     (void)esp_wifi_stop();
-  } else {
-    ESP_LOGE(tag, "esp_wifi_start(STA) failed; cannot initialize HWRNG setup code");
+
+    if (!iterate_kit_setup_code_valid(portal.setup_code)) {
+      wifi_err = ESP_FAIL;
+    } else {
+      wifi_config_t ap_cfg = {0};
+      (void)snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", portal.hostname);
+      ap_cfg.ap.ssid_len = (uint8_t)strlen(portal.hostname);
+      (void)snprintf(
+          (char *)ap_cfg.ap.password, sizeof(ap_cfg.ap.password), "%s", portal.setup_code);
+      ap_cfg.ap.channel = 1;
+      ap_cfg.ap.max_connection = 4;
+      ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+      ap_cfg.ap.pmf_cfg.required = false;
+
+      wifi_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+      if (wifi_err == ESP_OK) wifi_err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+      memset(&ap_cfg, 0, sizeof(ap_cfg));
+      if (wifi_err == ESP_OK) wifi_err = esp_wifi_start();
+    }
   }
 
-  wifi_config_t ap_cfg = {0};
-  (void)snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", portal.hostname);
-  ap_cfg.ap.ssid_len = (uint8_t)strlen(portal.hostname);
-  (void)snprintf(
-      (char *)ap_cfg.ap.password, sizeof(ap_cfg.ap.password), "%s", portal.setup_code);
-  ap_cfg.ap.channel = 1;
-  ap_cfg.ap.max_connection = 4;
-  ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-  ap_cfg.ap.pmf_cfg.required = false;
-
-  (void)esp_wifi_set_mode(WIFI_MODE_APSTA);
-  (void)esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
-  memset(&ap_cfg, 0, sizeof(ap_cfg));
-  if (esp_wifi_start() == ESP_OK) {
+  if (wifi_err == ESP_OK) {
     portal.rf_entropy_ready = true;
     (void)esp_wifi_scan_start(NULL, false);
     (void)xTaskCreatePinnedToCore(
         captive_dns_task, "captive-dns", DNS_TASK_STACK_BYTES, NULL, 3, NULL, 0);
     (void)start_http_server();
   } else {
-    ESP_LOGE(tag, "esp_wifi_start(APSTA) failed; HTTP portal not started");
+    radio_fault = true;
+    ESP_LOGE(
+        tag,
+        "Wi-Fi radio failed to start (%s) — Setup Mode unavailable; showing fault ring",
+        esp_err_to_name(wifi_err));
   }
 
   for (;;) {
@@ -1294,6 +1306,8 @@ void havpe_portal_run_setup_ap(
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     if (vis != HAVPE_VISUAL_NONE) {
       havpe_ring_render_gesture(vis, progress, (uint32_t)now, pixels);
+    } else if (radio_fault) {
+      havpe_ring_render_erase_error((uint32_t)now, pixels);
     } else {
       havpe_ring_render_setup_ap((uint32_t)now, pixels);
     }
@@ -1307,6 +1321,7 @@ void havpe_portal_run_lan_unlinked(
     const struct iterate_kit_led_ring *ring_facts,
     const struct iterate_kit_configuration *stored_cfg,
     const struct iterate_kit_configuration_presence *stored_presence) {
+  bool radio_fault = false;
   init_identity_base(ITERATE_KIT_BOOT_MODE_LAN_UNLINKED, stored_cfg, stored_presence);
   (void)snprintf(portal.connection_state, sizeof(portal.connection_state), "wifi_connecting");
   init_gpio_controls();
@@ -1325,23 +1340,32 @@ void havpe_portal_run_lan_unlinked(
   sta_cfg.sta.threshold.authmode =
       pass_len == 0U ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
-  (void)esp_wifi_init(&wifi_init);
-  (void)esp_event_handler_instance_register(
-      WIFI_EVENT, ESP_EVENT_ANY_ID, lan_unlinked_wifi_event, NULL, NULL);
-  (void)esp_event_handler_instance_register(
-      IP_EVENT, IP_EVENT_STA_GOT_IP, lan_unlinked_ip_event, NULL, NULL);
-  (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
-  (void)esp_wifi_set_mode(WIFI_MODE_STA);
-  (void)esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+  esp_err_t wifi_err = esp_wifi_init(&wifi_init);
+  if (wifi_err == ESP_OK) {
+    (void)esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, lan_unlinked_wifi_event, NULL, NULL);
+    (void)esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, lan_unlinked_ip_event, NULL, NULL);
+    (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    wifi_err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (wifi_err == ESP_OK) wifi_err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+  }
   memset(&sta_cfg, 0, sizeof(sta_cfg));
-  if (esp_wifi_start() == ESP_OK) {
+  if (wifi_err == ESP_OK) {
+    wifi_err = esp_wifi_start();
+  }
+  if (wifi_err == ESP_OK) {
     /* Wi-Fi RF is now active, so per-session/CSRF tokens and pairing patterns use HWRNG.
      * Note: the SoftAP setup code is never loaded or accepted in LAN modes. */
     portal.rf_entropy_ready = true;
     start_mdns_once();
     (void)start_http_server();
   } else {
-    ESP_LOGE(tag, "esp_wifi_start(STA) failed; LAN portal not started");
+    radio_fault = true;
+    ESP_LOGE(
+        tag,
+        "Wi-Fi radio failed to start (%s) — LAN portal unavailable; showing fault ring",
+        esp_err_to_name(wifi_err));
   }
 
   for (;;) {
@@ -1363,6 +1387,8 @@ void havpe_portal_run_lan_unlinked(
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     if (vis != HAVPE_VISUAL_NONE) {
       havpe_ring_render_gesture(vis, progress, (uint32_t)now, pixels);
+    } else if (radio_fault) {
+      havpe_ring_render_erase_error((uint32_t)now, pixels);
     } else if (!render_claim_ring_overlay(now, pixels)) {
       havpe_ring_render_lan_unlinked(connected, (uint32_t)now, pixels);
     }

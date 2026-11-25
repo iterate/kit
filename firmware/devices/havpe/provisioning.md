@@ -198,14 +198,15 @@ leaves a call running.
 - `ITERKIT1` C encoder and partial-config decoder (`components/core/src/configuration.c`), verified
   byte-for-byte against the TypeScript golden images (`configuration_test.c`), plus Wi-Fi-only,
   Wi-Fi-reset (mind preserved), password/voice validation, and mind-origin normalization.
-- Boot-mode selection, short-ID/hostname derivation, 60-bit Crockford Base32 setup-code generation
-  (`xxxx-xxxx-xxxx`), 128-bit session/CSRF token formatting, `WIFI:` QR escaping, Host-header
-  DNS-rebinding filter, per-client session isolation, per-session CSRF verification, two-tap visual
-  claim pairing (proving an unconfirmed claim grants **zero** write access, another browser cannot
-  see or hijack a pending claim, Mute OFF / cancel / 30 s expiry all revoke cleanly, Tap 2 confirms
-  only the claiming browser for 3 min with no extension on POST, eviction protection preserves
-  pending and unlocked sessions), and `writes_disabled` write-lock refusal
-  (`provisioning_state_test.c`).
+- Boot-mode selection (including one-boot RTC flag validation `iterate_kit_setup_once_rtc_valid`
+  and `iterate_kit_provisioning_select_boot_mode`), short-ID/hostname derivation, 60-bit Crockford
+  Base32 setup-code generation (`xxxx-xxxx-xxxx`), 128-bit session/CSRF token formatting, `WIFI:` QR
+  escaping, Host-header DNS-rebinding filter, per-client session isolation, per-session CSRF
+  verification, two-tap visual claim pairing (proving an unconfirmed claim grants **zero** write
+  access, another browser cannot see or hijack a pending claim, Mute OFF / cancel / 30 s expiry all
+  revoke cleanly, Tap 2 confirms only the claiming browser for 3 min with no extension on POST,
+  eviction protection preserves pending and unlocked sessions), and `writes_disabled` write-lock
+  refusal (`provisioning_state_test.c`).
 - RFC 1035 captive DNS responder for A/ANY, AAAA NODATA, and malformed packets (`captive_dns_test.c`).
 - Cookie header parsing (`iterate_kit_web_cookie_get`), mode action policy (`WIFI`, `MIND`, and
   `REBOOT` allowed only in `SETUP_AP`; only `SETTINGS` allowed on LAN), captive-probe detection,
@@ -219,6 +220,15 @@ leaves a call running.
   cancel, over-hold cancel), LED ring renderers (including Setup Mode violet, claim-open white,
   exact 3-LED quadrant claim pattern, and alternating red/amber erase-failure ring), and end-to-end
   call cancellation through `button.c` + `session_grammar.c` (`havpe_reset_gesture_test.c`).
+
+### Boot-tested in Espressif's ESP32-S3 QEMU (`scripts/ci/qemu-boot.sh`)
+
+- Boots the merged 16 MiB HAVPE flash image with an empty `iterate_kit` partition through the
+  ESP-IDF 6.1 2nd-stage bootloader, 8 MiB octal PSRAM test, `main_task: Calling app_main()`, reads
+  the empty `iterate_kit` partition, logs `device is not provisioned: storage=decode failed — entering
+Setup Mode`, evaluates `havpe_portal_consume_setup_ap_request()` cleanly on `ESP_RST_POWERON`, and
+  enters Setup Mode with zero crashes (`Guru Meditation` / `abort()`) or reboot loops. QEMU does not
+  emulate Wi-Fi PHY calibration, so execution stops inside `phy_init` once Setup Mode starts Wi-Fi.
 
 ### Built only (compiled with ESP-IDF 6.1 for `esp32s3`, partition layout checked)
 
