@@ -98,8 +98,13 @@ bool iterate_kit_platform_refresh_token_clear(void);
 
 /**
  * Read the `iterate_kit` partition allowing partial configurations (Wi-Fi-only
- * or mind-only). An erased partition (all 0xFF) is reported as DECODE_FAILED /
- * INVALID_MAGIC with `presence` cleared, which selects Setup AP mode.
+ * or mind-only). If a previous Wi-Fi-only reset lost power after erasing
+ * `iterate_kit`, transparently restores the verified pending NVS backup
+ * (`kit_wifi_rst`) back into `iterate_kit` and clears the backup. A valid
+ * `iterate_kit` partition always wins and clears any stale backup so a fresh
+ * Kit Flasher USB flash is never overwritten. An erased partition (all 0xFF)
+ * without a pending backup is reported as DECODE_FAILED / INVALID_MAGIC with
+ * `presence` cleared, selecting Setup AP mode.
  */
 struct iterate_kit_platform_provisioning_result
 iterate_kit_platform_read_stored_provisioning(
@@ -108,26 +113,31 @@ iterate_kit_platform_read_stored_provisioning(
 
 /**
  * Encode `configuration` (for groups enabled in `presence`) as an ITERKIT1
- * image, erase and write the `iterate_kit` partition, and verify read-back.
+ * image, erase and write the `iterate_kit` partition, verify read-back, and
+ * clear any stale Wi-Fi-reset NVS backup.
  */
 bool iterate_kit_platform_write_provisioning(
     const struct iterate_kit_configuration *configuration,
     const struct iterate_kit_configuration_presence *presence);
 
 /**
- * Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password while preserving
- * any saved mind/project credential, rotated refresh token, and status voice.
- * Fails closed without erasing the partition if the current configuration
- * cannot be read (e.g. transient mmap failure or corrupt image).
+ * Power-loss-safe Wi-Fi reset: clear ONLY the stored Wi-Fi SSID and password
+ * while preserving any saved mind/project credential, rotated refresh token,
+ * and status voice. Fails closed without erasing the partition if the current
+ * configuration cannot be read or if staging a verified pending copy of the
+ * retained image in NVS (`kit_wifi_rst`) fails before the sector erase. Clears
+ * and verifies the NVS backup only after the rewritten `iterate_kit` partition
+ * reads back Wi-Fi-free.
  */
 bool iterate_kit_platform_clear_wifi_provisioning(void);
 
 /**
  * Full wipe: permanently disables refresh-token NVS writes (serializing with
  * any in-flight `itx_transport` token commit), erases the `iterate_kit`
- * partition, drops any rotated refresh token in NVS (`iterate_token`), resets
- * kept speaker volume, and verifies all three by read-back. Preserves the
- * per-device setup code in NVS so the physical QR/setup card stays valid.
+ * partition, drops any rotated refresh token in NVS (`iterate_token`), any
+ * pending Wi-Fi-reset backup (`kit_wifi_rst`), and kept speaker volume, and
+ * verifies all four by read-back. Preserves the per-device setup code in NVS
+ * so the physical QR/setup card stays valid.
  */
 bool iterate_kit_platform_wipe_provisioning(void);
 

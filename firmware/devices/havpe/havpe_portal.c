@@ -3,6 +3,7 @@
 #include "havpe_reset_gesture.h"
 #include "iterate/kit/captive_dns.h"
 #include "iterate/kit/platforms/board.h"
+#include "iterate/kit/platforms/itx_transport.h"
 #include "iterate/kit/platforms/led_ring.h"
 #include "iterate/kit/platforms/provisioning.h"
 #include "iterate/kit/platforms/restart_note.h"
@@ -19,6 +20,7 @@
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -31,6 +33,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 
 static const char tag[] = "havpe-portal";
 
@@ -45,6 +48,8 @@ enum {
   POST_BODY_WIFI_MAX = 512,      /* /wifi (Setup AP only) */
   POST_BODY_MIND_MAX = 1024,     /* /mind (Setup AP only) */
   POST_BODY_DEADLINE_MS = 2000,  /* Hard wall-clock deadline to receive any POST body */
+  POST_BODY_RECV_SLICE_MS = 250, /* Per-recv cap (further clamped to remaining budget) */
+  HTTP_DEFAULT_RECV_TIMEOUT_S = 1,
   COOKIE_HEADER_MAX_BYTES = 512,
   SET_COOKIE_MAX_BYTES = 128,
   REBOOT_GRACE_MS = 700,
@@ -107,6 +112,8 @@ static struct {
   httpd_handle_t server;
   struct havpe_reset_gesture gesture;
   uint32_t last_shown_claim_id;
+  uint32_t staged_claim_id;
+  uint32_t staged_ring_seq;
   uint64_t last_net_poll_ms;
 } portal;
 
@@ -273,6 +280,7 @@ static void halt_with_erase_failure(const char *action) {
            "showing fault ring instead of success",
       action);
   for (;;) {
+    (void)esp_task_wdt_reset();
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
     havpe_ring_render_erase_error((uint32_t)monotonic_ms(), pixels);
     iterate_kit_led_ring_show_pixels(pixels, 200U);
@@ -322,19 +330,27 @@ static void execute_wifi_reset(void) {
 }
 
 static void execute_full_wipe(void) {
-  ESP_LOGW(tag, "full wipe triggered — latching portal & token writers off, clearing RAM, flash, NVS token and volume");
+  ESP_LOGW(
+      tag,
+      "full wipe triggered — revoking live transport session, latching portal & token writers off, "
+      "clearing RAM, flash, NVS token, backup and volume");
   __atomic_store_n(&portal_writes_latched, true, __ATOMIC_SEQ_CST);
-  /* Permanently latch refresh-token NVS writes off before erasing so
-   * `itx_transport` on `iterate-net` cannot commit a rotated token back. */
-  iterate_kit_platform_refresh_token_disable_writes();
+  /*
+   * End the board's live session BEFORE trying any flash/NVS erase: permanently
+   * disables refresh-token NVS writes, closes any open WebSocket/TLS stream on
+   * `iterate-net`, zeroes cached access/refresh tokens and Authorization headers
+   * in RAM, and waits for `iterate-net` to park so even a failed erase halted
+   * on the fault ring cannot reconnect with cached credentials.
+   */
+  const bool revoked = iterate_kit_itx_transport_revoke_session();
   if (portal.lock != NULL) (void)xSemaphoreTake(portal.lock, portMAX_DELAY);
   iterate_kit_portal_guard_disable_writes(&portal.guard);
   portal.reboot_pending = false;
   memset(&portal.config, 0, sizeof(portal.config));
   memset(&portal.presence, 0, sizeof(portal.presence));
-  const bool ok = iterate_kit_platform_wipe_provisioning();
+  const bool wiped = iterate_kit_platform_wipe_provisioning();
   if (portal.lock != NULL) xSemaphoreGive(portal.lock);
-  if (!ok) {
+  if (!revoked || !wiped) {
     halt_with_erase_failure("full wipe");
   }
   flash_confirm_and_restart((struct iterate_kit_rgb8){48U, 4U, 0U}, "factory-wipe");
@@ -469,10 +485,13 @@ static esp_err_t send_redirect(
 }
 
 /*
- * Bounded POST body reader with a hard monotonic wall-clock deadline.
+ * Bounded POST body reader with a hard monotonic wall-clock deadline (2 s).
  * Called ONLY AFTER Host, mode policy, write-latch, and session pre-checks pass,
- * and NEVER while holding `portal.lock`. Returning ESP_FAIL closes stalled
- * connections immediately instead of looping forever on timeouts.
+ * and NEVER while holding `portal.lock`. Sets `SO_RCVTIMEO` on the request's
+ * socket before every `httpd_req_recv()` to `min(remaining_ms, 250 ms)`, so a
+ * slow client cannot hold the single HTTP task past the 2 s deadline by more
+ * than lwIP/FreeRTOS tick granularity (~10–20 ms), and a physical reset/wipe
+ * aborts an in-flight receive within at most 250 ms.
  */
 static esp_err_t read_post_body(
     httpd_req_t *req, char *buf, size_t max_body_bytes, size_t *out_len) {
@@ -481,18 +500,37 @@ static esp_err_t read_post_body(
     (void)httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Request too large");
     return ESP_FAIL;
   }
+  const int fd = httpd_req_to_sockfd(req);
+  if (fd < 0) {
+    memset(buf, 0, max_body_bytes + 1U);
+    return ESP_FAIL;
+  }
   const uint64_t deadline_ms = monotonic_ms() + (uint64_t)POST_BODY_DEADLINE_MS;
   size_t remaining = req->content_len;
   size_t offset = 0U;
   while (remaining > 0U) {
+    const uint64_t now = monotonic_ms();
     if (__atomic_load_n(&portal_writes_latched, __ATOMIC_SEQ_CST) ||
-        monotonic_ms() >= deadline_ms) {
+        now >= deadline_ms) {
+      memset(buf, 0, max_body_bytes + 1U);
+      return ESP_FAIL;
+    }
+    uint64_t slice_ms = deadline_ms - now;
+    if (slice_ms > (uint64_t)POST_BODY_RECV_SLICE_MS) {
+      slice_ms = (uint64_t)POST_BODY_RECV_SLICE_MS;
+    }
+    struct timeval tv;
+    tv.tv_sec = (time_t)(slice_ms / 1000U);
+    tv.tv_usec = (suseconds_t)((slice_ms % 1000U) * 1000U);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
       memset(buf, 0, max_body_bytes + 1U);
       return ESP_FAIL;
     }
     const int received = httpd_req_recv(req, buf + offset, remaining);
     if (received <= 0) {
-      if (received == HTTPD_SOCK_ERR_TIMEOUT && monotonic_ms() < deadline_ms) {
+      if (received == HTTPD_SOCK_ERR_TIMEOUT &&
+          !__atomic_load_n(&portal_writes_latched, __ATOMIC_SEQ_CST) &&
+          monotonic_ms() < deadline_ms) {
         continue;
       }
       memset(buf, 0, max_body_bytes + 1U);
@@ -507,6 +545,13 @@ static esp_err_t read_post_body(
     }
     offset += (size_t)received;
     remaining -= (size_t)received;
+  }
+  {
+    /* Restore default socket receive timeout before returning on keep-alive. */
+    struct timeval default_tv;
+    default_tv.tv_sec = HTTP_DEFAULT_RECV_TIMEOUT_S;
+    default_tv.tv_usec = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &default_tv, sizeof(default_tv));
   }
   buf[offset] = '\0';
   *out_len = offset;
@@ -1041,7 +1086,7 @@ static bool start_http_server(void) {
   config.core_id = 0;
   config.max_open_sockets = 4;
   config.lru_purge_enable = true;
-  config.recv_wait_timeout = 1;
+  config.recv_wait_timeout = HTTP_DEFAULT_RECV_TIMEOUT_S;
   config.send_wait_timeout = 2;
   config.max_uri_handlers = 10;
 
@@ -1170,12 +1215,14 @@ static void handle_gesture_and_claim_cancel(
             &portal.guard, portal.last_shown_claim_id, now_ms);
       } else {
         portal.last_shown_claim_id = 0U;
+        portal.staged_claim_id = 0U;
         iterate_kit_portal_guard_open_claim(&portal.guard, now_ms);
       }
       xSemaphoreGive(portal.lock);
     }
     if (confirmed) {
       portal.last_shown_claim_id = 0U;
+      portal.staged_claim_id = 0U;
       havpe_reset_gesture_trigger_unlock_flash(&portal.gesture, now_ms);
       ESP_LOGI(tag, "LAN browser visual pairing confirmed for 180 s");
     } else if (prev_state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
@@ -1190,6 +1237,7 @@ static void handle_gesture_and_claim_cancel(
   if (portal.mode != ITERATE_KIT_BOOT_MODE_SETUP_AP &&
       (!muted || (vis != HAVPE_VISUAL_NONE && vis != HAVPE_VISUAL_UNLOCK_FLASH))) {
     portal.last_shown_claim_id = 0U;
+    portal.staged_claim_id = 0U;
     if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
       if (portal.guard.claim_state != ITERATE_KIT_CLAIM_NONE) {
         iterate_kit_portal_guard_cancel_claim(&portal.guard);
@@ -1200,26 +1248,42 @@ static void handle_gesture_and_claim_cancel(
   }
 }
 
-static bool render_claim_ring_overlay(
-    uint64_t now_ms, struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT]) {
+static void note_claim_pattern_refresh(
+    uint32_t claim_id, bool shown_ok, uint64_t now_ms) {
+  if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
+    iterate_kit_portal_guard_note_pattern_refresh(
+        &portal.guard, claim_id, shown_ok, now_ms);
+    xSemaphoreGive(portal.lock);
+  }
+}
+
+/*
+ * Prepare the LED pixels for any active pairing state WITHOUT starting the 2 s
+ * confirmation dwell timer. Dwell is started and maintained ONLY after
+ * `iterate_kit_led_ring_present()` reports a real (non-throttled) refresh as
+ * displayed; a failed refresh resets the dwell.
+ */
+static bool prepare_claim_ring_overlay(
+    uint64_t now_ms,
+    struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT],
+    uint32_t *out_claim_id) {
   enum iterate_kit_claim_state state = ITERATE_KIT_CLAIM_NONE;
   uint32_t claim_id = 0U;
   struct iterate_kit_claim_pattern pattern = {0};
+  if (out_claim_id != NULL) *out_claim_id = 0U;
   if (xSemaphoreTake(portal.lock, 0) == pdTRUE) {
     state = iterate_kit_portal_guard_claim_state(&portal.guard, now_ms);
-    if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM &&
-        iterate_kit_portal_guard_active_claim_pattern(
-            &portal.guard, now_ms, &claim_id, &pattern)) {
-      iterate_kit_portal_guard_note_pattern_shown(&portal.guard, claim_id, now_ms);
+    if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+      (void)iterate_kit_portal_guard_active_claim_pattern(
+          &portal.guard, now_ms, &claim_id, &pattern);
     }
     xSemaphoreGive(portal.lock);
   }
   if (state == ITERATE_KIT_CLAIM_PENDING_CONFIRM && claim_id != 0U) {
-    portal.last_shown_claim_id = claim_id;
+    if (out_claim_id != NULL) *out_claim_id = claim_id;
     havpe_ring_render_claim_pattern(pattern.color, pattern.position, (uint32_t)now_ms, pixels);
     return true;
   }
-  portal.last_shown_claim_id = 0U;
   if (state == ITERATE_KIT_CLAIM_OPEN) {
     havpe_ring_render_claim_open((uint32_t)now_ms, pixels);
     return true;
@@ -1410,17 +1474,32 @@ void havpe_portal_run_lan_unlinked(
       xSemaphoreGive(portal.lock);
     }
     struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
+    uint32_t frame_claim_id = 0U;
     if (vis != HAVPE_VISUAL_NONE) {
       portal.last_shown_claim_id = 0U;
       havpe_ring_render_gesture(vis, progress, (uint32_t)now, pixels);
     } else if (radio_fault) {
       portal.last_shown_claim_id = 0U;
       havpe_ring_render_erase_error((uint32_t)now, pixels);
-    } else if (!render_claim_ring_overlay(now, pixels)) {
+    } else if (!prepare_claim_ring_overlay(now, pixels, &frame_claim_id)) {
+      portal.last_shown_claim_id = 0U;
       havpe_ring_render_lan_unlinked(connected, (uint32_t)now, pixels);
+    } else if (frame_claim_id == 0U) {
+      portal.last_shown_claim_id = 0U;
     }
+    uint32_t seq_before = 0U;
+    uint32_t seq_after = 0U;
+    bool refresh_ok = false;
+    (void)iterate_kit_led_ring_last_refresh(&seq_before, NULL);
     iterate_kit_led_ring_show_pixels(pixels, 150U);
-    (void)iterate_kit_led_ring_present(NULL, esp_timer_get_time());
+    const bool presented = iterate_kit_led_ring_present(NULL, esp_timer_get_time());
+    (void)iterate_kit_led_ring_last_refresh(&seq_after, &refresh_ok);
+    if (seq_after != seq_before) {
+      /* Only non-throttled LED refreshes advance or reset the 2 s dwell timer. */
+      const bool shown_ok = presented && refresh_ok && frame_claim_id != 0U;
+      note_claim_pattern_refresh(frame_claim_id, shown_ok, now);
+      portal.last_shown_claim_id = shown_ok ? frame_claim_id : 0U;
+    }
     vTaskDelay(pdMS_TO_TICKS(25));
   }
 }
@@ -1443,6 +1522,22 @@ void havpe_portal_poll_normal(
     uint64_t now_ms) {
   if (portal.lock == NULL) return;
 
+  /*
+   * `board.c:present()` invokes `iterate_kit_led_ring_present()` immediately
+   * before `havpe_ui_present()` calls us. Check whether that pass performed an
+   * actual (non-throttled) LED refresh of the previously staged claim pixels
+   * and advance or reset the 2 s dwell timer accordingly BEFORE handling Tap 2.
+   */
+  uint32_t ring_seq = 0U;
+  bool ring_ok = false;
+  if (iterate_kit_led_ring_last_refresh(&ring_seq, &ring_ok) &&
+      ring_seq != portal.staged_ring_seq) {
+    const bool shown_ok = ring_ok && portal.staged_claim_id != 0U;
+    note_claim_pattern_refresh(portal.staged_claim_id, shown_ok, now_ms);
+    portal.last_shown_claim_id = shown_ok ? portal.staged_claim_id : 0U;
+    portal.staged_ring_seq = ring_seq;
+  }
+
   const enum havpe_gesture_event ev =
       havpe_reset_gesture_step(&portal.gesture, button_pressed, muted, now_ms);
   enum havpe_gesture_visual vis = HAVPE_VISUAL_NONE;
@@ -1452,12 +1547,20 @@ void havpe_portal_poll_normal(
   check_deferred_reboot(now_ms);
 
   struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
+  uint32_t frame_claim_id = 0U;
   if (vis != HAVPE_VISUAL_NONE) {
     portal.last_shown_claim_id = 0U;
+    portal.staged_claim_id = 0U;
+    note_claim_pattern_refresh(0U, false, now_ms);
     havpe_ring_render_gesture(vis, progress, (uint32_t)now_ms, pixels);
     iterate_kit_led_ring_show_pixels(pixels, 120U);
-  } else if (render_claim_ring_overlay(now_ms, pixels)) {
+  } else if (prepare_claim_ring_overlay(now_ms, pixels, &frame_claim_id)) {
+    portal.staged_claim_id = frame_claim_id;
+    if (frame_claim_id == 0U) portal.last_shown_claim_id = 0U;
     iterate_kit_led_ring_show_pixels(pixels, 120U);
+  } else {
+    portal.staged_claim_id = 0U;
+    portal.last_shown_claim_id = 0U;
   }
 
   /* Sample STA IP / RSSI and lazily start mDNS + HTTP at most once per second. */

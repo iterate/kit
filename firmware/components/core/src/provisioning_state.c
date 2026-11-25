@@ -35,6 +35,25 @@ enum iterate_kit_boot_mode iterate_kit_provisioning_select_boot_mode(
   return iterate_kit_provisioning_boot_mode(presence);
 }
 
+enum iterate_kit_wifi_reset_recovery_action
+iterate_kit_provisioning_wifi_reset_recovery(
+    bool partition_valid,
+    bool backup_present,
+    bool backup_pending_and_valid) {
+  if (partition_valid) {
+    return backup_present
+        ? ITERATE_KIT_RECOVERY_USE_PARTITION_AND_CLEAR_BACKUP
+        : ITERATE_KIT_RECOVERY_USE_PARTITION;
+  }
+  if (backup_present && backup_pending_and_valid) {
+    return ITERATE_KIT_RECOVERY_RESTORE_FROM_BACKUP;
+  }
+  if (backup_present) {
+    return ITERATE_KIT_RECOVERY_CLEAR_INVALID_BACKUP;
+  }
+  return ITERATE_KIT_RECOVERY_UNPROVISIONED;
+}
+
 const char *iterate_kit_boot_mode_name(enum iterate_kit_boot_mode mode) {
   switch (mode) {
     case ITERATE_KIT_BOOT_MODE_SETUP_AP:
@@ -500,14 +519,19 @@ enum iterate_kit_portal_auth_result iterate_kit_portal_guard_request_claim(
   return ITERATE_KIT_PORTAL_AUTH_OK;
 }
 
-void iterate_kit_portal_guard_note_pattern_shown(
+void iterate_kit_portal_guard_note_pattern_refresh(
     struct iterate_kit_portal_guard *guard,
     uint32_t claim_id,
+    bool shown_ok,
     uint64_t now_ms) {
-  if (guard == NULL || claim_id == 0U) return;
+  if (guard == NULL) return;
   expire_state(guard, now_ms);
-  if (guard->claim_state != ITERATE_KIT_CLAIM_PENDING_CONFIRM ||
-      guard->pending_claim_id != claim_id) {
+  if (guard->claim_state != ITERATE_KIT_CLAIM_PENDING_CONFIRM) {
+    return;
+  }
+  if (!shown_ok || claim_id == 0U || guard->pending_claim_id != claim_id) {
+    guard->pending_pattern_shown = false;
+    guard->pending_pattern_first_shown_ms = 0U;
     return;
   }
   if (!guard->pending_pattern_shown) {

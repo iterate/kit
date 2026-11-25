@@ -53,6 +53,28 @@ enum iterate_kit_boot_mode {
   ITERATE_KIT_BOOT_MODE_NORMAL,
 };
 
+/**
+ * Boot-time recovery decision for power-loss-safe Wi-Fi-only reset.
+ *
+ * Before erasing the single-sector `iterate_kit` partition during a Wi-Fi-only
+ * reset, firmware stages a verified copy of the Wi-Fi-cleared `ITERKIT1` image
+ * in NVS and marks it pending. At boot:
+ *   - A valid `iterate_kit` partition ALWAYS wins (so a fresh USB flash from
+ *     Kit Flasher is never overwritten by a stale backup); any leftover NVS
+ *     backup is cleared.
+ *   - An erased/invalid partition with a valid pending NVS backup restores the
+ *     preserved mind pairing back into `iterate_kit` and clears the NVS backup.
+ *   - Corrupt or non-pending backup debris without a valid partition is cleared
+ *     so the board boots unprovisioned cleanly.
+ */
+enum iterate_kit_wifi_reset_recovery_action {
+  ITERATE_KIT_RECOVERY_USE_PARTITION = 0,
+  ITERATE_KIT_RECOVERY_USE_PARTITION_AND_CLEAR_BACKUP,
+  ITERATE_KIT_RECOVERY_RESTORE_FROM_BACKUP,
+  ITERATE_KIT_RECOVERY_CLEAR_INVALID_BACKUP,
+  ITERATE_KIT_RECOVERY_UNPROVISIONED,
+};
+
 enum iterate_kit_portal_auth_result {
   ITERATE_KIT_PORTAL_AUTH_OK = 0,
   ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED,
@@ -157,6 +179,13 @@ bool iterate_kit_setup_once_rtc_valid(
 enum iterate_kit_boot_mode iterate_kit_provisioning_select_boot_mode(
     const struct iterate_kit_configuration_presence *presence,
     bool setup_ap_once_requested);
+
+/** Decide boot-time Wi-Fi-reset NVS backup recovery action. */
+enum iterate_kit_wifi_reset_recovery_action
+iterate_kit_provisioning_wifi_reset_recovery(
+    bool partition_valid,
+    bool backup_present,
+    bool backup_pending_and_valid);
 
 const char *iterate_kit_boot_mode_name(enum iterate_kit_boot_mode mode);
 
@@ -269,13 +298,18 @@ enum iterate_kit_portal_auth_result iterate_kit_portal_guard_request_claim(
     struct iterate_kit_claim_pattern *out_pattern);
 
 /**
- * Record that the LED ring has actually rendered and presented `claim_id`'s
- * pattern at `now_ms`. Confirmation requires this to have happened at least
- * `ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS` (2 s) before Tap 2.
+ * Record the outcome of an actual LED-ring refresh while a claim is pending.
+ * - `shown_ok == true` for the active `pending_claim_id` starts the dwell
+ *   timer (if not already started) and keeps it running.
+ * - `shown_ok == false` (LED refresh failure or overlay replacement) or a
+ *   mismatched `claim_id` resets the dwell timer so confirmation always
+ *   requires `ITERATE_KIT_PORTAL_CLAIM_MIN_SHOW_MS` (2 s) of continuous
+ *   driver-confirmed display.
  */
-void iterate_kit_portal_guard_note_pattern_shown(
+void iterate_kit_portal_guard_note_pattern_refresh(
     struct iterate_kit_portal_guard *guard,
     uint32_t claim_id,
+    bool shown_ok,
     uint64_t now_ms);
 
 /**

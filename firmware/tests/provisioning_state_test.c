@@ -170,7 +170,7 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
          ITERATE_KIT_PORTAL_AUTH_CLAIM_BUSY);
 
   /* Owner sees mismatched ring and flips Mute OFF -> cancels attacker's claim cleanly. */
-  iterate_kit_portal_guard_note_pattern_shown(&guard, claim_id, 3250U);
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, true, 3250U);
   old_claim_id = claim_id;
   iterate_kit_portal_guard_cancel_claim(&guard);
   assert(iterate_kit_portal_guard_claim_state(&guard, 3300U) == ITERATE_KIT_CLAIM_NONE);
@@ -185,7 +185,7 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
              rot_sid, &pat_a) == ITERATE_KIT_PORTAL_AUTH_OK);
   assert(iterate_kit_portal_guard_active_claim_pattern(&guard, 11050U, &claim_id, &pat_ring));
   assert(claim_id != old_claim_id);
-  iterate_kit_portal_guard_note_pattern_shown(&guard, claim_id, 11050U);
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, true, 11050U);
   assert(iterate_kit_portal_guard_ensure_session(
       &guard, rot_sid, s1, c1, 11100U, sid_a, csrf_a, &created) && !created);
   assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 40999U) ==
@@ -233,27 +233,46 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
         &guard, "", sp_s, sp_c, 61200U + i, sp_sid, sp_csrf, &created) && created);
   }
   assert(iterate_kit_portal_guard_session_has_pending_claim(&guard, sid_a, 62000U, &pat_check));
-  /* Cannot confirm before ring displays pattern, nor with a stale claim_id, nor before 2 s! */
+  /* Cannot confirm before ring displays pattern, nor after a failed refresh! */
   assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 62000U));
-  iterate_kit_portal_guard_note_pattern_shown(&guard, claim_id, 62000U);
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, false, 62000U);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 65000U));
+
+  /* Start dwell on a successful refresh at 62000, keep it on 62500, then fail at 63500 ->
+   * dwell MUST reset so Tap 2 at 64500 (>2 s after 62000) is refused! */
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, true, 62000U);
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, true, 62500U);
   assert(!iterate_kit_portal_guard_confirm_claim(&guard, old_claim_id, 65000U));
-  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 63999U));
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 63999U) ==
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 63499U));
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, false, 63500U);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 64500U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 64500U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
-  /* At >= 2000 ms after first shown on the ring, Tap 2 confirms! */
-  assert(iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 64000U));
-  assert(iterate_kit_portal_guard_claim_state(&guard, 64000U) == ITERATE_KIT_CLAIM_NONE);
-  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 64000U));
-  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_a, 64000U) == 180U);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 64000U) ==
+  /* Recovering with a fresh successful refresh at 64600 requires another full 2 s dwell;
+   * a mismatched claim_id refresh also resets dwell. */
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, true, 64600U);
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, old_claim_id, true, 65000U);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 66700U));
+
+  iterate_kit_portal_guard_note_pattern_refresh(&guard, claim_id, true, 66800U);
+  assert(!iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 68799U));
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 68799U) ==
+         ITERATE_KIT_PORTAL_AUTH_REQUIRED);
+
+  /* At >= 2000 ms after continuous successful display, Tap 2 confirms! */
+  assert(iterate_kit_portal_guard_confirm_claim(&guard, claim_id, 68800U));
+  assert(iterate_kit_portal_guard_claim_state(&guard, 68800U) == ITERATE_KIT_CLAIM_NONE);
+  assert(iterate_kit_portal_guard_session_is_unlocked(&guard, sid_a, 68800U));
+  assert(iterate_kit_portal_guard_session_unlock_remaining_s(&guard, sid_a, 68800U) == 180U);
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 68800U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
   /* Other browser is still locked. */
-  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 64000U));
+  assert(!iterate_kit_portal_guard_session_is_unlocked(&guard, sid_b, 68800U));
   /* Ordinary POSTs do not extend the 180 s deadline. */
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 243999U) ==
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 248799U) ==
          ITERATE_KIT_PORTAL_AUTH_OK);
-  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 244000U) ==
+  assert(iterate_kit_portal_guard_authorize_post(&guard, sid_a, csrf_a, 248800U) ==
          ITERATE_KIT_PORTAL_AUTH_REQUIRED);
 
   /* Disabling writes cancels any active claim and rejects all POSTs & claims. */
@@ -268,9 +287,65 @@ static void enforces_visual_claim_confirmation_and_client_isolation(void) {
          ITERATE_KIT_PORTAL_AUTH_WRITES_DISABLED);
 }
 
+static void decides_wifi_reset_backup_recovery_and_roundtrips_mind_image(void) {
+  /* Valid partition always wins (e.g. fresh USB flash from Kit Flasher). */
+  assert(iterate_kit_provisioning_wifi_reset_recovery(true, false, false) ==
+         ITERATE_KIT_RECOVERY_USE_PARTITION);
+  assert(iterate_kit_provisioning_wifi_reset_recovery(true, false, true) ==
+         ITERATE_KIT_RECOVERY_USE_PARTITION);
+  assert(iterate_kit_provisioning_wifi_reset_recovery(true, true, false) ==
+         ITERATE_KIT_RECOVERY_USE_PARTITION_AND_CLEAR_BACKUP);
+  assert(iterate_kit_provisioning_wifi_reset_recovery(true, true, true) ==
+         ITERATE_KIT_RECOVERY_USE_PARTITION_AND_CLEAR_BACKUP);
+
+  /* Invalid/erased partition restores ONLY when backup is present, pending, and valid. */
+  assert(iterate_kit_provisioning_wifi_reset_recovery(false, true, true) ==
+         ITERATE_KIT_RECOVERY_RESTORE_FROM_BACKUP);
+  assert(iterate_kit_provisioning_wifi_reset_recovery(false, true, false) ==
+         ITERATE_KIT_RECOVERY_CLEAR_INVALID_BACKUP);
+  assert(iterate_kit_provisioning_wifi_reset_recovery(false, false, false) ==
+         ITERATE_KIT_RECOVERY_UNPROVISIONED);
+  assert(iterate_kit_provisioning_wifi_reset_recovery(false, false, true) ==
+         ITERATE_KIT_RECOVERY_UNPROVISIONED);
+
+  /* Verify a Wi-Fi-cleared mind-only backup blob encodes <= 1024 B and round-trips cleanly. */
+  struct iterate_kit_configuration cfg = {0};
+  struct iterate_kit_configuration_presence pres = {0};
+  struct iterate_kit_configuration decoded = {0};
+  struct iterate_kit_configuration_presence decoded_pres = {0};
+  uint8_t image[1024];
+  size_t written = 0U;
+
+  cfg.platform = ITERATE_KIT_CONFIGURATION_PLATFORM_MIND;
+  cfg.status_voice = ITERATE_KIT_STATUS_VOICE_DAISY_BELL;
+  memcpy(cfg.wifi_ssid, "HomeWiFi", 9U);
+  memcpy(cfg.wifi_password, "supersecret1", 13U);
+  memcpy(cfg.os_base_url, "https://iterate.example.com", 28U);
+  memcpy(cfg.oauth_client_id, "https://k.iterate.com/client", 29U);
+  memcpy(cfg.oauth_refresh_token, "u1:g1:tok_refresh_1234", 23U);
+  pres.has_wifi = true;
+  pres.has_platform = true;
+  pres.has_status_voice = true;
+
+  iterate_kit_configuration_clear_wifi(&cfg, &pres);
+  assert(!pres.has_wifi && pres.has_platform && pres.has_status_voice);
+  assert(iterate_kit_configuration_encode(&cfg, &pres, image, sizeof(image), &written) ==
+         ITERATE_KIT_CONFIGURATION_OK);
+  assert(written >= ITERATE_KIT_CONFIGURATION_HEADER_SIZE && written <= 1024U);
+  assert(iterate_kit_configuration_decode_stored(&decoded, &decoded_pres, image, written) ==
+         ITERATE_KIT_CONFIGURATION_OK);
+  assert(!decoded_pres.has_wifi && decoded_pres.has_platform && decoded_pres.has_status_voice);
+  assert(decoded.wifi_ssid[0] == '\0' && decoded.wifi_password[0] == '\0');
+  assert(strcmp(decoded.os_base_url, "https://iterate.example.com") == 0);
+  assert(strcmp(decoded.oauth_refresh_token, "u1:g1:tok_refresh_1234") == 0);
+  assert(decoded.status_voice == ITERATE_KIT_STATUS_VOICE_DAISY_BELL);
+  assert(iterate_kit_provisioning_boot_mode(&decoded_pres) == ITERATE_KIT_BOOT_MODE_SETUP_AP);
+}
+
 int main(void) {
   selects_boot_mode_from_configuration_presence();
   derives_identity_setup_code_and_qr();
   enforces_visual_claim_confirmation_and_client_isolation();
+  decides_wifi_reset_backup_recovery_and_roundtrips_mind_image();
   return 0;
 }

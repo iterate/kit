@@ -46,6 +46,8 @@ static struct {
   led_strip_handle_t strip;
   uint8_t pixels;
   bool painted;
+  uint32_t refresh_seq;
+  bool last_refresh_ok;
   int64_t last_refresh_us;
   struct iterate_kit_rgb8 shown[12];
   struct iterate_kit_rgb8 volume[12];
@@ -103,9 +105,21 @@ void iterate_kit_led_ring_show_pixels(
   ring.custom_until_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
 }
 
+bool iterate_kit_led_ring_last_refresh(uint32_t *out_seq, bool *out_ok) {
+  if (out_seq != NULL) *out_seq = ring.refresh_seq;
+  if (out_ok != NULL) *out_ok = ring.last_refresh_ok;
+  return ring.refresh_seq != 0U;
+}
+
 bool iterate_kit_led_ring_present(
     const struct iterate_kit_conversation_visual_state *state, int64_t now_us) {
-  if (ring.strip == NULL || now_us - ring.last_refresh_us < 50000) return false;
+  if (ring.strip == NULL) {
+    ring.painted = false;
+    ring.last_refresh_ok = false;
+    ++ring.refresh_seq;
+    return false;
+  }
+  if (now_us - ring.last_refresh_us < 50000) return false;
 
   struct iterate_kit_rgb8 lights[ITERATE_KIT_CONVERSATION_LIGHT_COUNT];
   if (now_us < ring.custom_until_us) {
@@ -123,17 +137,33 @@ bool iterate_kit_led_ring_present(
   /* This is the animation cadence even when pixels are unchanged or the RMT
    * refresh fails: retry on the next bounded frame, never in a tight loop. */
   ring.last_refresh_us = now_us;
-  if (!iterate_kit_led_ring_dirty(ring.painted, ring.shown, lights)) return true;
+  if (!iterate_kit_led_ring_dirty(ring.painted, ring.shown, lights)) {
+    ring.last_refresh_ok = true;
+    ++ring.refresh_seq;
+    return true;
+  }
 
   struct iterate_kit_rgb8 pixels[252]; /* largest multiple of twelve in uint8_t */
-  if (!iterate_kit_led_ring_repeat(lights, ring.pixels, pixels)) return false;
+  if (!iterate_kit_led_ring_repeat(lights, ring.pixels, pixels)) {
+    ring.painted = false;
+    ring.last_refresh_ok = false;
+    ++ring.refresh_seq;
+    return false;
+  }
   for (uint8_t index = 0U; index < ring.pixels; ++index) {
     (void)led_strip_set_pixel(ring.strip, index,
         pixels[index].red, pixels[index].green, pixels[index].blue);
   }
-  if (led_strip_refresh(ring.strip) != ESP_OK) return false;
+  if (led_strip_refresh(ring.strip) != ESP_OK) {
+    ring.painted = false;
+    ring.last_refresh_ok = false;
+    ++ring.refresh_seq;
+    return false;
+  }
   ring.painted = true;
   memcpy(ring.shown, lights, sizeof(lights));
+  ring.last_refresh_ok = true;
+  ++ring.refresh_seq;
   return true;
 }
 #endif

@@ -34,6 +34,11 @@ void iterate_kit_led_ring_show_volume(uint8_t percent, uint32_t hold_ms);
 void iterate_kit_led_ring_show_pixels(
     const struct iterate_kit_rgb8 pixels[ITERATE_KIT_CONVERSATION_LIGHT_COUNT],
     uint32_t hold_ms);
+/** Report the sequence number and outcome of the most recent non-throttled
+ * `iterate_kit_led_ring_present()` refresh attempt. Returns true once at least
+ * one refresh attempt has been recorded; `*out_ok` is true only when the LED
+ * driver reported the frame as displayed (or unchanged while painted). */
+bool iterate_kit_led_ring_last_refresh(uint32_t *out_seq, bool *out_ok);
 
 #ifdef __cplusplus
 }

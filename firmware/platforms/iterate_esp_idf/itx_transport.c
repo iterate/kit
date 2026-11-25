@@ -421,6 +421,25 @@ static void look_for_the_network_by_another_spelling(
   }
 }
 
+static struct iterate_kit_itx_transport *active_transport;
+
+static void scrub_transport_credentials(
+    struct iterate_kit_itx_transport *transport) {
+  memset(&transport->tokens, 0, sizeof(transport->tokens));
+  memset(transport->refresh_token, 0, sizeof(transport->refresh_token));
+  memset(transport->websocket_headers, 0, sizeof(transport->websocket_headers));
+  memset(
+      transport->websocket_receive_storage,
+      0,
+      sizeof(transport->websocket_receive_storage));
+  memset(
+      transport->websocket_transmit_storage,
+      0,
+      sizeof(transport->websocket_transmit_storage));
+  transport->access_token_renew_at_us = 0;
+  atomic_store_u32(&transport->access_token_renew_at_s, 0U);
+}
+
 static void wifi_event(
     void *context,
     esp_event_base_t base,
@@ -428,6 +447,9 @@ static void wifi_event(
     void *event_data) {
   struct iterate_kit_itx_transport *transport = context;
   (void)base;
+  if (atomic_load_u32(&transport->session_revoked) != 0U) {
+    return;
+  }
   if (event_id == WIFI_EVENT_STA_START) {
     /*
      * Event callbacks publish intent and wake the owner; esp_wifi_connect() is
@@ -811,6 +833,11 @@ static bool access_token_fresh(
  */
 static enum iterate_kit_token_refresh_result refresh_access_token(
     struct iterate_kit_itx_transport *transport) {
+  if (atomic_load_u32(&transport->session_revoked) != 0U ||
+      iterate_kit_platform_refresh_token_writes_disabled()) {
+    scrub_transport_credentials(transport);
+    return ITERATE_KIT_TOKEN_REFRESH_FAILED;
+  }
   const int64_t deadline_us =
       esp_timer_get_time() + (int64_t)WEBSOCKET_CONNECT_TIMEOUT_MS * 1000;
   enum iterate_kit_token_refresh_result result =
@@ -825,6 +852,12 @@ static enum iterate_kit_token_refresh_result refresh_access_token(
           transport->websocket_receive_storage,
           sizeof(transport->websocket_receive_storage));
   while (result == ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK) {
+    if (atomic_load_u32(&transport->session_revoked) != 0U ||
+        !atomic_load_u32(&transport->network_task_running) ||
+        iterate_kit_platform_refresh_token_writes_disabled()) {
+      result = ITERATE_KIT_TOKEN_REFRESH_FAILED;
+      break;
+    }
     result = iterate_kit_token_refresh_step(
         &transport->token_refresh, &transport->tokens);
     if (result != ITERATE_KIT_TOKEN_REFRESH_WOULD_BLOCK) break;
@@ -835,6 +868,12 @@ static enum iterate_kit_token_refresh_result refresh_access_token(
     vTaskDelay(1);
   }
   iterate_kit_token_refresh_close(&transport->token_refresh);
+  if (atomic_load_u32(&transport->session_revoked) != 0U ||
+      iterate_kit_platform_refresh_token_writes_disabled()) {
+    /* Full wipe latched session revocation: scrub all cached secrets and abort. */
+    scrub_transport_credentials(transport);
+    return ITERATE_KIT_TOKEN_REFRESH_FAILED;
+  }
   if (result != ITERATE_KIT_TOKEN_REFRESH_DONE) {
     memset(&transport->tokens, 0, sizeof(transport->tokens));
     transport->access_token_renew_at_us = 0;
@@ -842,12 +881,6 @@ static enum iterate_kit_token_refresh_result refresh_access_token(
     iterate_kit_atomic_saturating_increment_relaxed_u32(
         &transport->token_refresh_failures);
     return result;
-  }
-  if (iterate_kit_platform_refresh_token_writes_disabled()) {
-    /* A full wipe has latched token writes off; drop in-memory secrets and abort. */
-    memset(&transport->tokens, 0, sizeof(transport->tokens));
-    memset(transport->refresh_token, 0, sizeof(transport->refresh_token));
-    return ITERATE_KIT_TOKEN_REFRESH_FAILED;
   }
   if (strcmp(transport->tokens.refresh_token, transport->refresh_token) != 0) {
     (void)snprintf(
@@ -926,9 +959,18 @@ static enum iterate_kit_status open_websocket(
   const int64_t deadline_us =
       esp_timer_get_time() + (int64_t)WEBSOCKET_CONNECT_TIMEOUT_MS * 1000;
   for (;;) {
+    if (atomic_load_u32(&transport->session_revoked) != 0U ||
+        !atomic_load_u32(&transport->network_task_running) ||
+        iterate_kit_platform_refresh_token_writes_disabled()) {
+      return ITERATE_KIT_IO_ERROR;
+    }
     switch (iterate_kit_websocket_client_open(
         &transport->websocket, esp_timer_get_time())) {
       case ITERATE_KIT_WEBSOCKET_OPEN_READY:
+        if (atomic_load_u32(&transport->session_revoked) != 0U ||
+            iterate_kit_platform_refresh_token_writes_disabled()) {
+          return ITERATE_KIT_IO_ERROR;
+        }
         return ITERATE_KIT_OK;
       case ITERATE_KIT_WEBSOCKET_OPEN_FAILED:
         return ITERATE_KIT_IO_ERROR;
@@ -977,6 +1019,18 @@ static void network_task(void *context) {
       wait_ticks = 1U;
     }
     (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
+    if (atomic_load_u32(&transport->session_revoked) != 0U ||
+        iterate_kit_platform_refresh_token_writes_disabled()) {
+      if (websocket_started) {
+        stop_websocket(transport, &websocket_started);
+      } else {
+        mark_socket_disconnected(transport);
+      }
+      discard_control_outbox(transport);
+      scrub_transport_credentials(transport);
+      atomic_store_u32(&transport->session_revoked_ack, 1U);
+      continue;
+    }
     const uint32_t work_started_at = esp_cpu_get_cycle_count();
     now_us = esp_timer_get_time();
     wifi_connected =
@@ -1106,10 +1160,23 @@ static void network_task(void *context) {
         }
         continue;
       }
+      if (atomic_load_u32(&transport->session_revoked) != 0U ||
+          iterate_kit_platform_refresh_token_writes_disabled()) {
+        scrub_transport_credentials(transport);
+        atomic_store_u32(&transport->session_revoked_ack, 1U);
+        continue;
+      }
       iterate_kit_atomic_saturating_increment_relaxed_u32(
           &transport->websocket_start_attempts);
       refresh_handshake_headers(transport);
       status = open_websocket(transport);
+      if (atomic_load_u32(&transport->session_revoked) != 0U ||
+          iterate_kit_platform_refresh_token_writes_disabled()) {
+        iterate_kit_websocket_client_close(&transport->websocket);
+        scrub_transport_credentials(transport);
+        atomic_store_u32(&transport->session_revoked_ack, 1U);
+        continue;
+      }
       /*
        * DNS/TCP/TLS/upgrade may consume the entire setup bound. Retry policy
        * must use the clock after that operation, not a stale pre-handshake
@@ -1186,6 +1253,8 @@ static void network_task(void *context) {
 
   stop_websocket(transport, &websocket_started);
   discard_control_outbox(transport);
+  scrub_transport_credentials(transport);
+  atomic_store_u32(&transport->session_revoked_ack, 1U);
   (void)esp_task_wdt_delete(NULL);
   /*
    * Publish exited only after the task has stopped socket I/O and released its
@@ -1326,6 +1395,9 @@ enum iterate_kit_status iterate_kit_itx_transport_start(
       transport->started) {
     return ITERATE_KIT_INVALID_ARGUMENT;
   }
+  if (iterate_kit_platform_refresh_token_writes_disabled()) {
+    return ITERATE_KIT_STATE_ERROR;
+  }
 
   error = esp_netif_init();
   if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
@@ -1435,6 +1507,7 @@ enum iterate_kit_status iterate_kit_itx_transport_start(
     remember_platform_error(transport, ESP_ERR_NO_MEM);
     return ITERATE_KIT_IO_ERROR;
   }
+  __atomic_store_n(&active_transport, transport, __ATOMIC_RELEASE);
   error = esp_wifi_start();
   /*
    * Voice stream events are latency-sensitive but tiny relative to even HT20
@@ -1478,6 +1551,9 @@ enum iterate_kit_status iterate_kit_itx_transport_start(
     error = ESP_ERR_INVALID_STATE;
   }
   if (error != ESP_OK) {
+    struct iterate_kit_itx_transport *expected = transport;
+    (void)__atomic_compare_exchange_n(
+        &active_transport, &expected, NULL, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
     atomic_store_u32(&transport->network_task_running, 0U);
     wake_network_task(transport);
     (void)esp_wifi_stop();
@@ -1877,9 +1953,42 @@ enum iterate_kit_status iterate_kit_itx_transport_stop(
   if (transport->owns_default_event_loop) {
     (void)esp_event_loop_delete_default();
   }
+  {
+    struct iterate_kit_itx_transport *expected = transport;
+    (void)__atomic_compare_exchange_n(
+        &active_transport, &expected, NULL, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+  }
   transport->started = false;
   transport->state = ITERATE_KIT_ITX_STOPPED;
   return ITERATE_KIT_OK;
+}
+
+bool iterate_kit_itx_transport_revoke_session(void) {
+  iterate_kit_platform_refresh_token_disable_writes();
+  struct iterate_kit_itx_transport *transport =
+      __atomic_load_n(&active_transport, __ATOMIC_ACQUIRE);
+  if (transport == NULL) {
+    return true;
+  }
+  atomic_store_u32(&transport->session_revoked, 1U);
+  mark_socket_disconnected(transport);
+  wake_network_task(transport);
+
+  TickType_t waited = 0U;
+  TickType_t delay = pdMS_TO_TICKS(10U);
+  const TickType_t timeout = pdMS_TO_TICKS(STOP_TIMEOUT_MS);
+  if (delay == 0U) {
+    delay = 1U;
+  }
+  while (atomic_load_u32(&transport->session_revoked_ack) == 0U &&
+         atomic_load_u32(&transport->network_task_exited) == 0U &&
+         waited < timeout) {
+    (void)esp_task_wdt_reset();
+    vTaskDelay(delay);
+    waited += delay;
+  }
+  return atomic_load_u32(&transport->session_revoked_ack) != 0U ||
+      atomic_load_u32(&transport->network_task_exited) != 0U;
 }
 
 /*
